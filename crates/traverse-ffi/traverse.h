@@ -11,9 +11,9 @@
  * [`traverse_last_error_code`].
  */
 enum TvError
-#if __STDC_VERSION__ >= 202311L
+#if defined(__cplusplus) || __STDC_VERSION__ >= 202311L
   : int32_t
-#endif // __STDC_VERSION__ >= 202311L
+#endif // defined(__cplusplus) || __STDC_VERSION__ >= 202311L
  {
   /**
    * No error.
@@ -74,47 +74,43 @@ enum TvError
    */
   TV_ERROR_INTERRUPTED = 13,
 };
+#ifndef __cplusplus
 #if __STDC_VERSION__ >= 202311L
 typedef enum TvError TvError;
 #else
 typedef int32_t TvError;
 #endif // __STDC_VERSION__ >= 202311L
+#endif // __cplusplus
 
 /**
  * Opaque handle representing an active bulk writer.
  */
-typedef struct TvBulkWriter {
-  uint8_t _opaque[0];
-} TvBulkWriter;
-
-/**
- * Opaque handle representing an open Traverse database.
- */
-typedef struct TvDatabase {
-  uint8_t _opaque[0];
-} TvDatabase;
-
-/**
- * Opaque handle representing a query result set.
- */
-typedef struct TvResult {
-  uint8_t _opaque[0];
-} TvResult;
+typedef struct TvBulkWriter TvBulkWriter;
 
 /**
  * Opaque handle that stops a running statement from any thread: a transaction's
  * (`traverse_canceller`) or one auto-commit statement's (`traverse_canceller_new`).
  */
-typedef struct TvCanceller {
-  uint8_t _opaque[0];
-} TvCanceller;
+typedef struct TvCanceller TvCanceller;
+
+/**
+ * Opaque handle representing an open Traverse database.
+ */
+typedef struct TvDatabase TvDatabase;
+
+/**
+ * Opaque handle representing a query result set.
+ */
+typedef struct TvResult TvResult;
 
 /**
  * Opaque handle representing an active write transaction.
  */
-typedef struct TvTransaction {
-  uint8_t _opaque[0];
-} TvTransaction;
+typedef struct TvTransaction TvTransaction;
+
+#ifdef __cplusplus
+extern "C" {
+#endif // __cplusplus
 
 /**
  * Begin a bulk load: a write transaction that skips the redo log. [`traverse_bulk_commit`] saves
@@ -772,5 +768,9 @@ int32_t traverse_cancel(const struct TvCanceller *canceller);
  * be using it.
  */
 void traverse_canceller_free(struct TvCanceller *canceller);
+
+#ifdef __cplusplus
+}  // extern "C"
+#endif  // __cplusplus
 
 #endif  /* TRAVERSE_H */

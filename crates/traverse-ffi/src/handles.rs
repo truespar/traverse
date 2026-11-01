@@ -73,34 +73,33 @@ pub(crate) struct ResultInner {
 // ---------------------------------------------------------------------------
 // Opaque C-visible marker types
 // ---------------------------------------------------------------------------
+//
+// Not repr(C): C only ever holds pointers to them, and cbindgen declares a type without a C
+// layout as an incomplete struct (`typedef struct TvDatabase TvDatabase;`), the standard C
+// opaque handle, where a repr(C) one would get a zero-length array member ISO C rejects.
 
 /// Opaque handle representing an open Traverse database.
-#[repr(C)]
 pub struct TvDatabase {
     _opaque: [u8; 0],
 }
 
 /// Opaque handle representing an active bulk writer.
-#[repr(C)]
 pub struct TvBulkWriter {
     _opaque: [u8; 0],
 }
 
 /// Opaque handle representing an active write transaction.
-#[repr(C)]
 pub struct TvTransaction {
     _opaque: [u8; 0],
 }
 
 /// Opaque handle representing a query result set.
-#[repr(C)]
 pub struct TvResult {
     _opaque: [u8; 0],
 }
 
 /// Opaque handle that stops a running statement from any thread: a transaction's
 /// (`traverse_canceller`) or one auto-commit statement's (`traverse_canceller_new`).
-#[repr(C)]
 pub struct TvCanceller {
     _opaque: [u8; 0],
 }

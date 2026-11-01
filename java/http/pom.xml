@@ -65,6 +65,20 @@
     </dependencies>
 
     <build>
+        <resources>
+            <resource>
+                <directory>src/main/resources</directory>
+            </resource>
+            <!-- the licence texts, in META-INF -->
+            <resource>
+                <directory>${project.basedir}/../..</directory>
+                <targetPath>META-INF</targetPath>
+                <includes>
+                    <include>LICENSE-MIT</include>
+                    <include>LICENSE-APACHE</include>
+                </includes>
+            </resource>
+        </resources>
         <pluginManagement>
             <plugins>
                 <plugin>

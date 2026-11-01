@@ -41,6 +41,16 @@ studio/dist-wasm/
 studio/tmp_tic_test/
 crates/traverse-wasm/pkg/
 crates/traverse-wasm/js/pkg/
+# licence texts copied into the npm and PyPI packages at pack time
+node/http/LICENSE-*
+node/embedded/LICENSE-*
+node/embedded/npm/*/LICENSE-*
+node/embedded/npm/*/THIRD-PARTY-NOTICES
+python/http/LICENSE-*
+crates/traverse-python/LICENSE-*
+crates/traverse-python/THIRD-PARTY-NOTICES
+crates/traverse-wasm/js/LICENSE-*
+crates/traverse-wasm/js/THIRD-PARTY-NOTICES
 java/http/target/
 
 # Release + build artifacts (never commit)

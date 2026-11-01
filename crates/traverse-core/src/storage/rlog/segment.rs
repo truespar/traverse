@@ -294,15 +294,21 @@ impl SegmentReader {
     }
 }
 
+/// The directory a file sits in: its parent, or the working directory for a bare file name
+/// (`Path::new("db.tvdb").parent()` is `Some("")`, which no directory call accepts).
+pub(crate) fn dir_of(path: &Path) -> &Path {
+    match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    }
+}
+
 /// Redo-log segments of the `.tvdb` at `tvdb_path`, sorted by segment_id.
 pub fn segments_of(tvdb_path: &Path) -> Result<Vec<PathBuf>> {
-    let (Some(dir), Some(stem)) = (
-        tvdb_path.parent(),
-        tvdb_path.file_name().and_then(|n| n.to_str()),
-    ) else {
+    let Some(stem) = tvdb_path.file_name().and_then(|n| n.to_str()) else {
         return Ok(Vec::new());
     };
-    discover_segments(dir, stem)
+    discover_segments(dir_of(tvdb_path), stem)
 }
 
 /// Deletes redo-log segments (of a database that's gone, or covered by a snapshot elsewhere), then
@@ -316,8 +322,8 @@ pub fn remove_segments(paths: &[PathBuf]) -> Result<()> {
         }
     }
     // a directory handle only opens on unix; elsewhere the deletion is already durable metadata
-    if let Some(dir) = paths.first().and_then(|p| p.parent())
-        && let Ok(dir) = std::fs::File::open(dir)
+    if let Some(first) = paths.first()
+        && let Ok(dir) = std::fs::File::open(dir_of(first))
     {
         let _ = dir.sync_all();
     }

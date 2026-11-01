@@ -79,8 +79,8 @@ onBeforeUnmount(() => {
     <div class="wasm-banner__text">
       <strong>WASM preview.</strong>
       Traverse is running entirely in this browser tab - your data lives in OPFS and is not shared.
-      <a href="https://truespar.com/traverse/docs/v1/getting-started" target="_blank" rel="noopener">Get the full version</a>
-      for multi-user, server-side persistence, and more.
+      <a href="https://truespar.com/traverse/docs/v1/getting-started" target="_blank" rel="noopener">Run the Traverse server</a>
+      for multi-user access, server-side persistence and more.
     </div>
     <button class="wasm-banner__close" title="Dismiss" @click="dismiss" aria-label="Dismiss WASM mode notice">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">

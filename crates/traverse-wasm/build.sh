@@ -47,7 +47,7 @@ else
   _w() { printf '%s' "$1"; }
 fi
 _sep=$'\x1f'
-_here="$(cd "$(dirname "$0")/../.." && pwd)"
+_here="$(cd "$SCRIPT_DIR/../.." && pwd)"
 _remap="--remap-path-prefix${_sep}$(_w "$_here")=src${_sep}"
 _remap+="--remap-path-prefix${_sep}${_here}=src${_sep}"
 _remap+="--remap-path-prefix${_sep}$(_w "${CARGO_HOME:-$HOME/.cargo}/registry/src")=dep:${_sep}"
@@ -102,6 +102,8 @@ cp -r pkg/* js/pkg/
 # through js/pkg/package.json's `main` field. Nested package.json
 # files are inert for npm publishing, so keeping it is harmless.
 rm -f js/pkg/.gitignore js/pkg/README.md
+# the licence texts, and the notices of the Rust crates compiled into the module
+cp ../../LICENSE-MIT ../../LICENSE-APACHE ../../THIRD-PARTY-NOTICES js/
 
 echo "-> Done. Publish-ready package at:"
 echo "    $SCRIPT_DIR/js/"

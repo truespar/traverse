@@ -13,6 +13,12 @@
     "url": "https://github.com/truespar/traverse/issues"
   },
   "type": "module",
+  "files": [
+    "src/",
+    "README.md",
+    "LICENSE-MIT",
+    "LICENSE-APACHE"
+  ],
   "exports": "./src/index.js",
   "engines": {
     "node": ">=22.0.0"

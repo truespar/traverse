@@ -6,7 +6,10 @@
   ],
   "main": "traverse-node.win32-x64-msvc.node",
   "files": [
-    "traverse-node.win32-x64-msvc.node"
+    "traverse-node.win32-x64-msvc.node",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+    "THIRD-PARTY-NOTICES"
   ],
   "description": "Embedded Traverse graph database for Node.js: the engine in your process, no server",
   "keywords": [

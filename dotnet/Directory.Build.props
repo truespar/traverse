@@ -22,6 +22,12 @@
     <PackageReleaseNotes>https://github.com/truespar/traverse/blob/main/RELEASE_NOTES.md</PackageReleaseNotes>
   </PropertyGroup>
 
+  <!-- the licence texts in every package -->
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)../LICENSE-MIT;$(MSBuildThisFileDirectory)../LICENSE-APACHE"
+          Pack="true" PackagePath="" Visible="false" />
+  </ItemGroup>
+
   <PropertyGroup Condition="'$(Configuration)' == 'Release'">
     <DebugType>none</DebugType>
     <DebugSymbols>false</DebugSymbols>

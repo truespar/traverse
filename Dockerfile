@@ -16,6 +16,9 @@ COPY studio/package.json studio/package-lock.json ./
 # lockfile committed to git.
 RUN npm install --no-audit --no-fund --ignore-scripts
 COPY studio/ ./
+# the graph layout engine Studio imports from ../packages (its d3/graphology imports resolve to
+# Studio's install, see resolve.dedupe in vite.config.ts)
+COPY packages/ /src/packages/
 # Server-only build: VITE_TRAVERSE_NO_WASM=1 (set in .env.server) makes
 # Vite tree-shake the dynamic WASM-client import out of the bundle.
 # tsconfig.server.json drops wasm-api.ts from type-check too. The
@@ -44,10 +47,12 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /src/target/release/traverse-server /usr/local/bin/traverse-server
+COPY --chmod=0644 LICENSE LICENSE-MIT LICENSE-APACHE THIRD-PARTY-NOTICES /usr/share/doc/traverse/
 
 ENV TRAVERSE_LISTEN=0.0.0.0:7690
 ENV TRAVERSE_HTTP_LISTEN=0.0.0.0:7691
-ENV TRAVERSE_API_KEY=tvs_docker
+# no fixed API key: each container generates one and prints it at startup (docker logs);
+# set TRAVERSE_API_KEY for a key of your own
 
 EXPOSE 7690 7691 50051
 

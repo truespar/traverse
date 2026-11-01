@@ -23,6 +23,9 @@
           Pack="true"
           PackagePath="runtimes/linux-x64/native/"
           Condition="Exists('runtimes/linux-x64/native/libtraverse_ffi.so')" />
+    <!-- the notices of the Rust crates compiled into it -->
+    <None Include="$(MSBuildThisFileDirectory)../../../THIRD-PARTY-NOTICES"
+          Pack="true" PackagePath="" Visible="false" />
   </ItemGroup>
 
 </Project>

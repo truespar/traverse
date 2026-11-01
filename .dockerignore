@@ -1,7 +1,17 @@
-target/
-.git/
-studio/node_modules/
-benchmarks/data/
-tmp_examples/
-dotnet/
-*.md
+# The build context is what the Dockerfile copies, nothing else: the workspace, Studio and the
+# licence files (release archives, virtualenvs and datasets in the checkout stay out)
+*
+!Cargo.toml
+!Cargo.lock
+!crates/
+!studio/
+!packages/
+!LICENSE
+!LICENSE-MIT
+!LICENSE-APACHE
+!THIRD-PARTY-NOTICES
+**/target/
+**/node_modules/
+crates/traverse-wasm/pkg/
+studio/dist/
+studio/dist-wasm/

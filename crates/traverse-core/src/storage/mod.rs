@@ -120,11 +120,7 @@ pub(crate) fn rename_durable(from: &std::path::Path, to: &std::path::Path) -> st
     #[cfg(not(windows))]
     {
         std::fs::rename(from, to)?;
-        let dir = match to.parent() {
-            Some(d) if !d.as_os_str().is_empty() => d,
-            _ => std::path::Path::new("."),
-        };
-        std::fs::File::open(dir)?.sync_all()
+        std::fs::File::open(rlog::segment::dir_of(to))?.sync_all()
     }
 }
 

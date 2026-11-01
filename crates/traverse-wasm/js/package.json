@@ -19,7 +19,10 @@
     "index.d.ts",
     "worker.js",
     "request-queue.js",
-    "pkg/"
+    "pkg/",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+    "THIRD-PARTY-NOTICES"
   ],
   "keywords": [
     "graph-database",
@@ -33,7 +36,7 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/truespar/traverse.git",
-    "directory": "crates/traverse-wasm"
+    "directory": "crates/traverse-wasm/js"
   },
   "bugs": {
     "url": "https://github.com/truespar/traverse/issues"

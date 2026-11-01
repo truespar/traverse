@@ -17,7 +17,7 @@ use super::record::{CommitPayload, Op, RECORD_ALIGNMENT, RecordKind, encode_reco
 use super::recovery::{RecoveryReport, scan_segments};
 use super::segment::{
     DEFAULT_SEGMENT_SIZE, MIN_SEGMENT_SIZE, SEGMENT_HEADER_SIZE, SegmentHeader, SegmentWriter,
-    discover_segments, remove_segments, segment_path,
+    dir_of, discover_segments, remove_segments, segment_path,
 };
 
 /// Observability counters. Updated under the caller-side writer mutex, so reads
@@ -52,12 +52,7 @@ pub struct WriterOptions {
 impl WriterOptions {
     /// Stem and directory from a `.tvdb` path.
     pub fn from_tvdb_path(tvdb_path: &Path) -> Result<Self> {
-        let dir = tvdb_path
-            .parent()
-            .ok_or_else(|| {
-                Error::InvalidFormat("rlog: tvdb path has no parent directory".to_string())
-            })?
-            .to_path_buf();
+        let dir = dir_of(tvdb_path).to_path_buf();
         let file_name = tvdb_path
             .file_name()
             .and_then(|n| n.to_str())

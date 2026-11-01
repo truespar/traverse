@@ -4,10 +4,11 @@ All notable changes to Traverse are documented in this file.
 
 ---
 
-## 0.9.0 - unreleased
+## 0.9.0 - 2026-11-01
 
 ### Licensing removed
 
+- **Open source.** Traverse is licensed under MIT OR Apache-2.0, at your option, and developed in the open at https://github.com/truespar/traverse. Every archive, the Docker image and every package (NuGet, Maven, npm, PyPI) include both licence texts; the ones that carry the engine also include `THIRD-PARTY-NOTICES`, the components compiled into it.
 - **No licence key, no limits.** Traverse no longer asks for a licence key and no longer enforces plan limits. The 7-day trial, the activation flow, device registration, the database/node/edge/connection caps and the per-feature gates (user management, Graph Assistant) are gone; every feature is available to everyone. `--license-key` / `TRAVERSE_LICENSE_KEY` / `license_key`, the `/api/license/*` endpoints and the `license` block of `/api/health` have been removed, as have `Database.OpenLicensed` (.NET), `Database.openLicensed` (Java), `traverse.open_licensed` (Python) and `openLicensed` (Node.js) - use the plain `open`.
 - **No version check.** The server, CLI (`:update`) and `traverse-admin update` no longer check online for new releases; the `update` block of `/api/health` and `/api/update/download` are gone.
 - **No outside service.** Nothing in Traverse calls home any more. A shared query link now carries the query itself (in the part of the URL after `#`, which the browser never sends anywhere), so it works on any server and in the browser build; Studio's feedback form has been removed. `--api-base` / `TRAVERSE_API_BASE` / `api_base` and the `/api/feedback` and `/api/share-query` endpoints have been removed.
@@ -37,6 +38,7 @@ All notable changes to Traverse are documented in this file.
 - **The log stays small.** Every snapshot save (`POST /api/save`, the periodic checkpoint, shutdown) deletes the redo-log segments it covers; previously they accumulated in `wal` mode. Snapshot files are installed with a durable rename, so a crash can't bring back the previous snapshot.
 - **A closed database is one file.** Closing a database, from an embedded binding or the CLI, deletes its redo log once the `.tvdb` holds everything in it, so a file built with an SDK or `traverse-admin` comes without a log segment beside it.
 - In `wal` mode a transaction larger than a log segment (32 MiB, e.g. one statement creating a few hundred thousand nodes) failed to commit. It now gets a log segment sized to hold it, and recovery replays it like any other.
+- Fixed: a database opened by a relative path (`open("registry.tvdb")`) couldn't be opened again after a crash ("file exists"), since recovery looked for its redo log nowhere, and saving or closing it never removed the log.
 - Fixed: a database file opened without its redo log beside it (copied, uploaded or built on another machine) logged its new commits at positions the file already covered, so a crash lost them; the log now always continues past the file. A log left over from another copy of the database is no longer appended to.
 - Fixed: a save running while writes were committing could record a commit as saved that wasn't in the file, so it was skipped on recovery; a commit landing during a save could be left out of the next save; the `wal-async` background sync stalled commits while it ran.
 
@@ -54,6 +56,7 @@ All notable changes to Traverse are documented in this file.
 - **Files stop growing under updates.** A save reuses the space of the records it deletes or replaces, and finds a page with room through a map instead of reading every page of the file for each record, so saving a few changes to a large database stays quick and a database updated over and over keeps its size.
 - **Go modules live in the repository.** The Go packages are now `github.com/truespar/traverse/go` (embedded) and `github.com/truespar/traverse/go/http` (HTTP client), so `go get` fetches them straight from GitHub; change `truespar.com/traverse-go` imports to the new paths. The embedded package still loads the native library from `TRAVERSE_FFI_LIB` or next to the binary.
 - **Go on Linux and macOS.** The embedded Go package only compiled on Windows; it now loads `libtraverse_ffi.so` / `.dylib` with `dlopen` there too, still without CGo. `Open` returns an error when the native library is missing or from another version, instead of panicking.
+- **The native library as a download.** `traverse-ffi-<version>-x86_64-windows.zip` and `traverse-ffi-<version>-x86_64-linux.tar.gz` on the GitHub release hold the library the Go package loads and C code links against, with its header `traverse.h`. The header now declares the handle types as incomplete structs and wraps its declarations in `extern "C"`, so it compiles as ISO C (`-pedantic`) and as C++, with GCC and MSVC.
 - **Python releases the GIL** while it waits for the writer lock, runs a query, commits, saves or closes, so other Python threads keep running.
 - **Node.js package.** The embedded Node.js binding is published as `@truespar/traverse-node`, with prebuilt addons for Windows x64 and Linux x64 (glibc) and TypeScript types. Results are built straight into JavaScript values, so floats keep `NaN` and `+/-Infinity` (they came back as `null`), and a crash inside the engine fails the call with an error (GQLSTATUS `50N42`) instead of ending the Node.js process.
 - **Bring your own native library.** `TRAVERSE_FFI_LIB` (.NET, as in Go) and `TRAVERSE_JAVA_LIB` or the `traverse.library` system property (Java) load the native library from a file, for a platform the packages don't bundle (macOS, ARM64) or a build of your own.
@@ -123,7 +126,7 @@ All notable changes to Traverse are documented in this file.
 - Fixed: renaming a database in `wal` or `wal-async` mode left its redo log under the old name, so commits since the last save were lost on restart; dropping a database left its redo log behind, where it could replay into a later database of the same name. Aliases and Studio's saved queries and styles are written crash-safely, and concurrent Studio edits no longer lose one another.
 - **The Windows service is the full server.** Running as a service now has gRPC, TLS, the periodic checkpoint, `wal-async` syncing, the configured durability mode, ML and `SHOW SETTINGS`, like the console server.
 - A request that panics no longer makes every later request touching the database list, users, query plans or background tasks fail. A background task that fails unexpectedly is reported as failed instead of staying "running" and blocking `/api/quiesce`. Saves, loads, renames and user changes over HTTP no longer stall other requests while they write, and a download now fails if the database couldn't be saved first.
-- Studio's AI chat, feedback and query-sharing proxies now verify the API server's certificate.
+- **The Docker image has no built-in API key.** It set `TRAVERSE_API_KEY=tvs_docker`, a key anyone could look up; a container now generates its own at startup and prints it in `docker logs`. Pass `-e TRAVERSE_API_KEY=tvs_...` for a fixed one.
 
 ### Fixes
 

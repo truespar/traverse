@@ -153,6 +153,9 @@ shown in the server output.
 docker run -p 7690:7690 -p 7691:7691 -v traverse-data:/data truespar/traverse
 ```
 
+The container generates an API key at startup and prints it in its log (`docker logs`). For a
+key that stays the same across restarts, pass your own: `-e TRAVERSE_API_KEY=tvs_...`.
+
 ## Building a database file
 
 Each example creates `registry.tvdb` with two companies, an ownership relationship and an index
@@ -216,8 +219,10 @@ db.close()
 ```
 
 **Go** (`go get github.com/truespar/traverse/go`). The package loads the native library from
-`TRAVERSE_FFI_LIB`, from the executable's directory or from the system library path. Property
-values are given as strings:
+`TRAVERSE_FFI_LIB`, from the executable's directory or from the system library path; the
+[GitHub release](https://github.com/truespar/traverse/releases) has it for Windows and Linux x64
+(`traverse-ffi-<version>-x86_64-windows.zip`, `traverse-ffi-<version>-x86_64-linux.tar.gz`).
+Property values are given as strings:
 
 ```go
 db, err := traverse.Open("registry.tvdb")
@@ -235,9 +240,10 @@ check(bulk.Commit())
 check(db.Close())
 ```
 
-The C API in `crates/traverse-ffi/traverse.h` has the same calls. Besides the bulk writer, each
-SDK runs Cypher and GQL statements in transactions, for example `MERGE`, `CREATE INDEX` and
-`CREATE CONSTRAINT`.
+The C API in `crates/traverse-ffi/traverse.h` has the same calls; the `traverse-ffi` archives on
+the release hold the header with the library (and, for Windows, its import library
+`traverse_ffi.dll.lib`). Besides the bulk writer, each SDK runs Cypher and GQL statements in
+transactions, for example `MERGE`, `CREATE INDEX` and `CREATE CONSTRAINT`.
 
 Without code, `traverse-admin` builds a file from CSV files (see the
 [admin reference](docs/reference/admin.md) for the format):
