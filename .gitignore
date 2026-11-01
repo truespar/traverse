@@ -1,0 +1,61 @@
+/target
+**/*.rs.bk
+*.pdb
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vs/
+.vscode/
+*.iml
+
+# Environment
+.env
+.env.*
+# Build-mode env files that don't contain secrets - let them ship.
+!studio/.env.server
+!studio/.env.wasm
+
+# Benchmark artifacts
+/target/criterion
+/benchmarks/data/
+*.tvdb
+__pycache__/
+.venv/
+.pytest_cache/
+tck_*.txt
+
+# Studio (Vue frontend)
+node_modules/
+studio/dist/
+studio/dist-wasm/
+
+# Coverage
+/coverage
+*.profraw
+*.profdata
+studio/tmp_tic_test/
+crates/traverse-wasm/pkg/
+crates/traverse-wasm/js/pkg/
+java/http/target/
+
+# Release + build artifacts (never commit)
+/dist/
+/java/target/
+/python/http/dist/
+/pokec_catalog/
+.claude/settings.local.json
+
+# Scratch / temp working dirs
+tmp_examples/
+/tmp_test/
+/tmp_upload/
+/tmp_smoke/
+/tmp_src/
+/tmp_target/
+java/http/tmp_examples
+studio/.vite/

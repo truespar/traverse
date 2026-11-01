@@ -1,0 +1,34 @@
+{
+  "name": "@truespar/traverse-node-linux-x64-gnu",
+  "version": "0.9.0",
+  "cpu": [
+    "x64"
+  ],
+  "main": "traverse-node.linux-x64-gnu.node",
+  "files": [
+    "traverse-node.linux-x64-gnu.node"
+  ],
+  "description": "Embedded Traverse graph database for Node.js: the engine in your process, no server",
+  "keywords": [
+    "graph",
+    "database",
+    "cypher",
+    "gql",
+    "embedded",
+    "traverse"
+  ],
+  "homepage": "https://truespar.com/traverse/docs",
+  "license": "MIT OR Apache-2.0",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "os": [
+    "linux"
+  ],
+  "libc": [
+    "glibc"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

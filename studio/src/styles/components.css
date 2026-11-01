@@ -1,0 +1,442 @@
+/* Traverse Studio - Shared Component Styles */
+
+/* Kill the iOS double-tap-zoom delay on tappable controls.
+   `touch-action: manipulation` tells the browser the element only
+   needs pan + pinch-zoom, never double-tap-to-zoom - so taps fire
+   immediately without the 300ms wait. */
+button,
+[role="button"],
+a,
+input,
+select,
+textarea,
+label {
+  touch-action: manipulation;
+}
+
+/* Stop iOS rubber-band on the document and contain overscroll so a
+   pull-down inside a scrollable panel doesn't leak out and trigger a
+   page reload or scroll the whole shell. */
+html, body {
+  overscroll-behavior: none;
+}
+
+/* -- Buttons -------------------------------------------------- */
+.fg-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 16px;
+  font-family: var(--tv-font-sans);
+  font-size: var(--tv-font-size-sm);
+  font-weight: 500;
+  line-height: 1;
+  border: 1px solid var(--tv-border-default);
+  border-radius: var(--tv-radius-md);
+  background: var(--tv-bg-elevated);
+  color: var(--tv-text-primary);
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+  height: 34px;
+  white-space: nowrap;
+}
+.fg-btn:hover {
+  border-color: var(--tv-border-strong);
+}
+.fg-btn:active {
+  background: var(--tv-bg-inset);
+}
+.fg-btn--primary {
+  background: var(--tv-accent);
+  color: var(--tv-text-inverse);
+  border-color: transparent;
+}
+.fg-btn--primary:hover {
+  background: var(--tv-accent-hover);
+  border-color: transparent;
+}
+.fg-btn--primary:active {
+  background: var(--tv-accent-active);
+}
+.fg-btn--danger {
+  background: var(--tv-status-error);
+  color: var(--tv-text-inverse);
+  border-color: transparent;
+}
+.fg-btn--danger:hover {
+  background: var(--tv-status-error-hover);
+  border-color: transparent;
+}
+.fg-btn--ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--tv-text-secondary);
+}
+.fg-btn--ghost:hover {
+  background: var(--tv-bg-hover);
+  color: var(--tv-text-primary);
+}
+.fg-btn--icon {
+  width: 34px;
+  padding: 0;
+}
+.fg-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+.fg-btn--sm {
+  height: 28px;
+  padding: 2px 12px;
+  font-size: var(--tv-font-size-xs);
+}
+
+/* -- Icon Button (borderless) --------------------------------- */
+.fg-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: var(--tv-radius-sm);
+  background: transparent;
+  color: var(--tv-text-muted);
+  cursor: pointer;
+  transition: color 0.15s ease, background 0.15s ease;
+}
+.fg-icon-btn:hover {
+  background: var(--tv-bg-hover);
+  color: var(--tv-text-primary);
+}
+.fg-icon-btn--active {
+  background: var(--tv-accent-subtle);
+  color: var(--tv-accent);
+}
+.fg-icon-btn--active:hover {
+  background: var(--tv-accent-subtle);
+  color: var(--tv-accent);
+}
+
+/* -- Tabs ----------------------------------------------------- */
+.fg-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--tv-border-default);
+  padding: 0 8px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  /* Hide the scrollbar entirely - on desktop the tab strip rarely
+     overflows, and on touch the scrollbar would overlap the active
+     tab's underline. Tabs are still swipeable. */
+  scrollbar-width: none;
+}
+.fg-tabs::-webkit-scrollbar {
+  display: none;
+}
+.fg-tab {
+  padding: 6px 12px;
+  font-size: var(--tv-font-size-sm);
+  font-weight: 500;
+  color: var(--tv-text-muted);
+  cursor: pointer;
+  border: none;
+  background: none;
+  border-bottom: 2px solid transparent;
+  transition: color 0.15s ease;
+  margin-bottom: -1px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.fg-tab:hover {
+  color: var(--tv-text-secondary);
+}
+.fg-tab--active {
+  color: var(--tv-text-primary);
+  border-bottom-color: var(--tv-accent);
+}
+
+/* -- Panel ---------------------------------------------------- */
+.fg-panel {
+  background: var(--tv-bg-surface);
+  border: 1px solid var(--tv-border-default);
+  border-radius: var(--tv-radius-md);
+}
+
+/* -- Resizer Handle ------------------------------------------- */
+/* Visually 1px border line; transparent padding provides a wider drag target */
+.fg-resizer {
+  flex-shrink: 0;
+  cursor: col-resize;
+  position: relative;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+/* The visible 1px line */
+.fg-resizer::before {
+  content: '';
+  position: absolute;
+  background: var(--tv-border-default);
+  transition: background 0.15s ease;
+}
+.fg-resizer:hover::before,
+.fg-resizer--active::before {
+  background: var(--tv-accent);
+}
+
+.fg-resizer--h {
+  width: 100%;
+  height: 7px;
+  cursor: row-resize;
+}
+.fg-resizer--h::before {
+  left: 0; right: 0;
+  top: 3px;
+  height: 1px;
+}
+.fg-resizer--v {
+  width: 7px;
+  height: 100%;
+}
+.fg-resizer--v::before {
+  top: 0; bottom: 0;
+  left: 3px;
+  width: 1px;
+}
+
+/* Grip dot indicator */
+.fg-resizer::after {
+  content: '';
+  position: relative;
+  z-index: 1;
+  border-radius: 3px;
+  background: var(--tv-border-strong);
+  transition: background 0.15s ease;
+}
+.fg-resizer:hover::after,
+.fg-resizer--active::after {
+  background: var(--tv-accent);
+}
+
+.fg-resizer--v::after {
+  width: 7px;
+  height: 28px;
+  background-image: radial-gradient(circle, var(--tv-text-muted) 0.8px, transparent 0.8px);
+  background-size: 3px 5px;
+  background-position: center;
+  background-repeat: repeat-y;
+}
+.fg-resizer--v:hover::after,
+.fg-resizer--v.fg-resizer--active::after {
+  background-image: radial-gradient(circle, var(--tv-text-inverse) 0.8px, transparent 0.8px);
+  background-size: 3px 5px;
+  background-position: center;
+  background-repeat: repeat-y;
+}
+
+.fg-resizer--h::after {
+  width: 28px;
+  height: 7px;
+  background-image: radial-gradient(circle, var(--tv-text-muted) 0.8px, transparent 0.8px);
+  background-size: 5px 3px;
+  background-position: center;
+  background-repeat: repeat-x;
+}
+.fg-resizer--h:hover::after,
+.fg-resizer--h.fg-resizer--active::after {
+  background-image: radial-gradient(circle, var(--tv-text-inverse) 0.8px, transparent 0.8px);
+  background-size: 5px 3px;
+  background-position: center;
+  background-repeat: repeat-x;
+}
+
+/* -- Badge / Chip --------------------------------------------- */
+.fg-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 9px;
+  font-family: var(--tv-font-mono);
+  font-size: var(--tv-font-size-xs);
+  font-weight: 500;
+  border-radius: 9999px;
+  background: var(--tv-accent-subtle);
+  color: var(--tv-text-secondary);
+}
+
+/* -- Input ---------------------------------------------------- */
+.fg-input {
+  height: 34px;
+  padding: 0 12px;
+  font-family: var(--tv-font-sans);
+  font-size: var(--tv-font-size-sm);
+  border: 1px solid var(--tv-border-default);
+  border-radius: var(--tv-radius-md);
+  background: var(--tv-bg-base);
+  color: var(--tv-text-primary);
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.fg-input::placeholder {
+  color: var(--tv-text-muted);
+}
+.fg-input:hover {
+  border-color: var(--tv-border-strong);
+}
+.fg-input:focus {
+  border-color: var(--tv-border-focus);
+  box-shadow: 0 0 0 2px var(--tv-accent-subtle);
+}
+.fg-input--sm {
+  height: 28px;
+  padding: 0 10px;
+  font-size: var(--tv-font-size-xs);
+}
+
+/* -- Select --------------------------------------------------- */
+.fg-select {
+  height: 30px;
+  padding: 0 28px 0 10px;
+  font-family: var(--tv-font-sans);
+  font-size: var(--tv-font-size-xs);
+  border: 1px solid var(--tv-border-default);
+  border-radius: var(--tv-radius-md);
+  background: var(--tv-bg-base);
+  color: var(--tv-text-primary);
+  cursor: pointer;
+  outline: none;
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%237E8B97' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 6px center;
+  transition: border-color 0.15s ease;
+}
+.fg-select:hover {
+  border-color: var(--tv-border-strong);
+}
+.fg-select:focus {
+  border-color: var(--tv-border-focus);
+  box-shadow: 0 0 0 2px var(--tv-accent-subtle);
+}
+.fg-select--sm {
+  height: 26px;
+  font-size: var(--tv-font-size-xs);
+}
+
+/* -- Tooltip -------------------------------------------------- */
+.fg-tooltip {
+  position: absolute;
+  z-index: 1000;
+  padding: 8px 12px;
+  font-size: var(--tv-font-size-xs);
+  background: var(--tv-bg-elevated);
+  border: 1px solid var(--tv-border-default);
+  border-radius: var(--tv-radius-lg);
+  box-shadow: var(--tv-shadow-md);
+  pointer-events: none;
+  max-width: 300px;
+}
+
+/* -- Spinner -------------------------------------------------- */
+@keyframes fg-spin {
+  to { transform: rotate(360deg); }
+}
+.fg-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--tv-border-default);
+  border-top-color: var(--tv-accent);
+  border-radius: 50%;
+  animation: fg-spin 0.6s linear infinite;
+}
+
+/* -- Modal Overlay ------------------------------------------- */
+.fg-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--tv-bg-overlay);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+/* Shared modal transition (use <Transition name="modal">) */
+.modal-enter-active { transition: opacity 0.15s ease; }
+.modal-leave-active { transition: opacity 0.12s ease; }
+.modal-enter-from,
+.modal-leave-to { opacity: 0; }
+
+.modal-enter-active .fg-modal,
+.modal-enter-active .drop-modal,
+.modal-enter-active .ub-modal,
+.modal-enter-active .fb-panel,
+.modal-enter-active .ap-panel,
+.modal-enter-active .lp-panel {
+  transition: transform 0.15s ease;
+}
+.modal-leave-active .fg-modal,
+.modal-leave-active .drop-modal,
+.modal-leave-active .ub-modal,
+.modal-leave-active .fb-panel,
+.modal-leave-active .ap-panel,
+.modal-leave-active .lp-panel {
+  transition: transform 0.12s ease;
+}
+.modal-enter-from .fg-modal,
+.modal-enter-from .drop-modal,
+.modal-enter-from .ub-modal,
+.modal-enter-from .fb-panel,
+.modal-enter-from .ap-panel,
+.modal-enter-from .lp-panel,
+.modal-leave-to .fg-modal,
+.modal-leave-to .drop-modal,
+.modal-leave-to .ub-modal,
+.modal-leave-to .fb-panel,
+.modal-leave-to .ap-panel,
+.modal-leave-to .lp-panel {
+  transform: scale(0.96);
+}
+
+/* Mobile: clamp every modal panel so it fits on a phone instead of
+   overflowing the viewport. Each modal sets its own desktop width in
+   its component; this just caps and shrinks at narrow widths.
+
+   The overlay itself gets padding equal to the bottom tab bar +
+   iOS safe-area insets so the flex-centered modal sits inside the
+   visible area instead of behind the tab bar or under the notch. */
+@media (max-width: 768px) {
+  .fg-modal-overlay {
+    padding-top: calc(env(safe-area-inset-top) + 12px);
+    padding-bottom: calc(var(--tv-activitybar-mobile-height, 56px) + env(safe-area-inset-bottom) + 12px);
+    padding-left: 8px;
+    padding-right: 8px;
+    box-sizing: border-box;
+  }
+  .fg-modal-overlay .fg-modal,
+  .fg-modal-overlay .drop-modal,
+  .fg-modal-overlay .ub-modal,
+  .fg-modal-overlay .fb-panel,
+  .fg-modal-overlay .ap-panel,
+  .fg-modal-overlay .lp-panel {
+    width: 100% !important;
+    max-width: none !important;
+    max-height: 100% !important;
+  }
+}
+
+/* -- Dot Indicator -------------------------------------------- */
+.fg-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.fg-dot--green  { background: var(--tv-status-success); }
+.fg-dot--red    { background: var(--tv-status-error); }
+.fg-dot--yellow { background: var(--tv-status-warning); }

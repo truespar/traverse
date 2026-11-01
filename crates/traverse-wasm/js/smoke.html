@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<!--
+  Manual smoke test for @truespar/traverse-wasm.
+
+  Serve this directory with any static server that emits the
+  cross-origin-isolation headers required by SharedArrayBuffer.
+  Easiest: the included `serve.sh` (Python with COEP/COOP headers).
+
+      cd crates/traverse-wasm/js
+      python3 ../serve.py              # serves http://localhost:8000
+
+  Then open http://localhost:8000/smoke.html.
+
+  The page constructs a TraverseDb, runs three queries, and prints
+  the results inline. If you see "Smoke test passed" the package
+  is functional end-to-end (WASM + Worker + thread pool).
+-->
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>traverse-wasm smoke test</title>
+  <style>
+    body { font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; margin: 24px; max-width: 820px; }
+    h1 { font-size: 18px; }
+    pre { background: #f4f4f4; padding: 10px 12px; border-radius: 4px; overflow-x: auto; }
+    .ok { color: #197f3a; font-weight: 600; }
+    .err { color: #b1290a; font-weight: 600; }
+    .muted { color: #666; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h1>@truespar/traverse-wasm - smoke test</h1>
+  <p class="muted">
+    Constructs a TraverseDb, runs a CREATE, a MATCH, and CALL traverse.pageRank.stream.
+    Watch the console for warnings.
+  </p>
+  <div id="status">initializing...</div>
+  <pre id="output"></pre>
+
+  <script type="module">
+    const out = document.getElementById('output')
+    const status = document.getElementById('status')
+    const log = (msg, level = '') => {
+      out.textContent += msg + '\n'
+      if (level === 'err') console.error(msg)
+      else console.log(msg)
+    }
+
+    try {
+      const { TraverseDb } = await import('./index.js')
+      const t0 = performance.now()
+      const db = await TraverseDb.open({ numThreads: navigator.hardwareConcurrency })
+      log(`ok: TraverseDb.open in ${(performance.now() - t0).toFixed(1)}ms (version ${db.version})`)
+
+      // Catalog check
+      const catalog = await db.algorithms()
+      log(`ok: algorithms(): ${catalog.algorithms.length} procedures`)
+
+      // CREATE
+      await db.query(`
+        CREATE (a:Person {name: 'Alice'}),
+               (b:Person {name: 'Bob'}),
+               (c:Person {name: 'Carol'}),
+               (a)-[:KNOWS]->(b),
+               (b)-[:KNOWS]->(c),
+               (a)-[:KNOWS]->(c)
+      `)
+      const n = await db.nodeCount(), e = await db.edgeCount()
+      log(`ok: created graph: ${n} nodes, ${e} edges`)
+
+      // MATCH
+      const r = await db.query("MATCH (n:Person) RETURN n.name AS name ORDER BY name")
+      log(`ok: MATCH returned ${r.rows.length} rows in ${r.time_ms.toFixed(2)}ms`)
+      log(JSON.stringify(r.rows))
+
+      // PageRank
+      const pr = await db.query(`
+        CALL traverse.pageRank.stream({maxIterations: 20})
+        YIELD nodeId, score
+        RETURN nodeId, score ORDER BY score DESC
+      `)
+      log(`ok: PageRank stream returned ${pr.rows.length} rows in ${pr.time_ms.toFixed(2)}ms`)
+      log(JSON.stringify(pr.rows))
+
+      // GQL dialect - routes through the ISO/IEC 39075 parser
+      // (traverse-gql) instead of openCypher. The FILTER keyword is
+      // GQL-only, so a mis-route to the Cypher parser fails loudly.
+      const gql = await db.query(
+        "MATCH (n:Person) FILTER n.name <> 'Bob' RETURN n.name AS name ORDER BY name",
+        null,
+        { dialect: 'gql' },
+      )
+      log(`ok: GQL dialect returned ${gql.rows.length} rows in ${gql.time_ms.toFixed(2)}ms`)
+      log(JSON.stringify(gql.rows))
+
+      // OPFS round-trip - commit (binary .tvdb), reset, restore
+      const cb = await db.commit('smoke-test')
+      log(`ok: commit('smoke-test'): wrote ${cb.bytes.toLocaleString()} bytes (.tvdb binary) to OPFS`)
+
+      await db.clear()
+      const after = await db.stats()
+      log(`ok: clear: now ${after.nodes} nodes, ${after.edges} edges`)
+
+      const restored = await db.load('smoke-test')
+      log(`ok: load('smoke-test'): restored ${restored.nodes}n / ${restored.edges}e`)
+
+      const list = await db.listDatabases()
+      log(`ok: listDatabases: ${list.map(d => d.name).join(', ')}`)
+
+      await db.deleteDatabase('smoke-test')
+      const list2 = await db.listDatabases()
+      log(`ok: deleteDatabase: now [${list2.map(d => d.name).join(', ')}]`)
+
+      status.innerHTML = '<span class="ok">Smoke test passed</span>'
+    } catch (err) {
+      status.innerHTML = '<span class="err">Smoke test failed</span>'
+      log(String(err.stack ?? err), 'err')
+      console.error(err)
+    }
+  </script>
+</body>
+</html>

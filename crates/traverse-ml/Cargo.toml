@@ -1,0 +1,84 @@
+[package]
+name = "traverse-ml"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Graph machine learning for Traverse: GNN training and prediction (GCN, GraphSAGE, GAT, R-GCN), GraphMAE embeddings and explanations, built on Burn"
+publish = false
+
+# --- Backend feature selection ------------------------------------
+#
+# Burn's feature surface is wide (50+ features). We expose three
+# named feature sets (README.md, Backends):
+#
+#   cpu - Burn NDArray backend. Default; works everywhere.
+#   cuda - Burn CUDA backend. Native-server only.
+#   wgpu - Burn WGPU backend. WASM + cross-platform GPU.
+#
+# Backends are mutually exclusive at runtime (you instantiate one
+# Backend type alias per binary), but multiple features can be
+# enabled at build time so the same crate compiles for several
+# targets.
+
+[features]
+default = ["cpu"]
+# CPU backend (NdArray) is the always-available fallback. `cuda` and
+# `wgpu` add GPU backends on top of it - the CPU backend stays present
+# so tests can cross-check GPU results against a known-good baseline
+# and so the engine has a runtime fallback when GPU init fails.
+cpu = ["burn/std", "burn/ndarray", "burn/autodiff"]
+cuda = ["cpu", "burn/cuda", "dep:cudarc"]
+wgpu = ["cpu", "burn/wgpu"]
+
+[dependencies]
+burn = { version = "0.21", default-features = false }
+# The GPU probe (`device`): checks for the driver and NVRTC without the panics Burn's CUDA runtime
+# raises when they're missing. Same crate and loading mode as Burn's CUDA backend (libraries are
+# loaded at runtime, so a `cuda` build still starts on machines without them).
+cudarc = { version = "0.19", default-features = false, features = ["std", "driver", "nvrtc", "fallback-dynamic-loading", "cuda-version-from-build-system", "fallback-latest"], optional = true }
+rand = { version = "0.10", default-features = false, features = ["std", "std_rng"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+traverse-codec = { path = "../traverse-codec" }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+# WASM: enable getrandom's wasm_js backend so anything in the dep tree
+# (Burn -> rand 0.10 -> getrandom 0.4) can pull entropy from Web Crypto.
+# Without this, building for wasm32-unknown-unknown fails inside getrandom.
+#
+# Three versions are pinned because the dep tree has all three:
+#   * 0.4.2 - Burn's rand 0.10 chain (the new API uses Cargo features)
+#   * 0.3.x - older Burn-side leftovers (still feature-based)
+#   * 0.2.x - anything else (uses the legacy `js` feature)
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }
+getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+
+# Runtime WASM smoke test infrastructure. Pulled in only on wasm32
+# so the native test suite isn't slowed by an extra dep.
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[lib]
+path = "src/lib.rs"
+
+[[example]]
+name = "gcn_smoke"
+path = "examples/gcn_smoke.rs"
+
+[[example]]
+name = "train_pokec"
+path = "examples/train_pokec.rs"
+
+[[example]]
+name = "predict_pokec"
+path = "examples/predict_pokec.rs"
+
+[lints]
+workspace = true

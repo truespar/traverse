@@ -1,0 +1,144 @@
+# Traverse Server Configuration
+#
+# Copy this file to traverse.toml and uncomment the settings you need.
+# The server auto-detects traverse.toml in the working directory,
+# or pass --config <path> to use a different location.
+#
+# Precedence: CLI args > environment variables > this file > built-in defaults
+
+# Bolt protocol listen address
+# Env: TRAVERSE_LISTEN
+# listen = "0.0.0.0:7690"
+
+# HTTP API and WebSocket listen address (Studio, REST, /api/save)
+# Env: TRAVERSE_HTTP_LISTEN
+# http_listen = "0.0.0.0:7691"
+
+# Path to .tvdb file or directory of .tvdb files
+# Single file: opens as the default database
+# Directory: each *.tvdb becomes a named database
+# Env: TRAVERSE_DATA
+# data = "/var/lib/traverse/databases"
+
+# Default database name (used when clients don't specify one)
+# Env: TRAVERSE_DEFAULT_DB
+# default_db = "traverse"
+
+# Durability mode
+#   "snapshot" (default) - writes are in-memory at full speed; data is
+#                persisted on /api/save, at graceful shutdown and by the
+#                periodic checkpoint (checkpoint_interval below).
+#   "wal-async" - every commit is appended to a redo log before the ACK;
+#                the log is synced to disk in the background every
+#                wal_fsync_ms, which bounds what a crash can lose.
+#   "wal" - every commit is appended to the redo log and fdatasync'd
+#                before the client sees an ACK (group commit shares syncs
+#                across concurrent writers). Crash-safe, but write
+#                throughput becomes disk-sync-bound.
+# Switching modes is safe: log segments left by a previous wal or
+# wal-async run are replayed on the next startup in any mode.
+# Env: TRAVERSE_DURABILITY
+# durability = "snapshot"
+
+# wal-async only: milliseconds between background syncs of the redo log
+# Env: TRAVERSE_WAL_FSYNC_MS
+# wal_fsync_ms = 1000
+
+# Seconds between background saves of changed databases (0 = off). Bounds
+# crash loss in snapshot mode and log replay length in the WAL modes.
+# Env: TRAVERSE_CHECKPOINT_INTERVAL
+# checkpoint_interval = 300
+
+# Memory budget - accepts human-readable sizes (KB, MB, GB, TB) or raw bytes
+# Defaults to 90% of system RAM if unset
+# Env: TRAVERSE_MEMORY_LIMIT
+# memory_limit = "8GB"
+
+# Per-query memory budget - a query whose buffers (sorts, aggregates, joins,
+# Eager barriers, results) exceed it fails with a clear error instead of
+# exhausting the server. Defaults to 25% of system RAM; 0 = unlimited.
+# Env: TRAVERSE_QUERY_MEMORY_LIMIT
+# query_memory_limit = "2GB"
+
+# Seed admin user on first startup (ignored if users already exist)
+# Format: user:password
+# Env: TRAVERSE_AUTH
+# auth = "admin:changeme"
+
+# Query timeout in milliseconds (0 or unset = no timeout)
+# Env: TRAVERSE_QUERY_TIMEOUT
+# query_timeout = 30000
+
+# Seconds an explicit transaction may sit idle before it's rolled back (0 = no limit)
+# Env: TRAVERSE_TX_IDLE_TIMEOUT
+# tx_idle_timeout = 60
+
+# Log level (trace, debug, info, warn, error)
+# Env: TRAVERSE_LOG_LEVEL
+# log_level = "info"
+
+# Directory for log files (daily rotation, e.g. traverse.log.2026-03-13)
+# When set, logs are written to both stdout and the log file.
+# Env: TRAVERSE_LOG_DIR
+# log_dir = "/var/log/traverse"
+
+# Log queries slower than this threshold (milliseconds)
+# Env: TRAVERSE_SLOW_QUERY_THRESHOLD
+# slow_query_threshold = 1000
+
+# IP allowlist - array of CIDR ranges (unset = all IPs allowed)
+# Env: TRAVERSE_ALLOWED_IPS (comma-separated)
+# allowed_ips = ["10.0.0.0/8", "192.168.0.0/16"]
+
+# Allow database deletion via Studio and the HTTP API (default: true; false locks it down)
+# Env: TRAVERSE_ALLOW_DROP_DATABASE
+# allow_drop_database = false
+
+# HTTP API key; must start with "tvs_". Auto-generated (and shown in the startup banner)
+# when unset
+# Env: TRAVERSE_API_KEY
+# api_key = "tvs_..."
+
+# Where ML training and inference run when a call names no device: "auto" (the first usable GPU,
+# else the CPU), "cpu", "gpu" or "gpu:<n>". GPUs need a build with the ml-cuda feature.
+# Env: TRAVERSE_ML_DEVICE
+# ml_device = "auto"
+
+# ML training jobs that may run at once; the rest queue
+# Env: TRAVERSE_ML_MAX_JOBS
+# ml_max_jobs = 1
+
+# Suppress the startup banner (default: false). The banner prints the API key,
+# so enable this in unattended/cloud deployments where stdout is captured and
+# shipped to logs. Env: TRAVERSE_QUIET
+# quiet = true
+
+# TLS - requires building with the tls feature
+# Env: TRAVERSE_TLS_CERT, TRAVERSE_TLS_KEY
+# tls_cert = "/etc/traverse/cert.pem"
+# tls_key = "/etc/traverse/key.pem"
+
+# gRPC - requires building with the grpc feature
+# Env: TRAVERSE_GRPC_LISTEN
+# grpc_listen = "0.0.0.0:50051"
+
+# Studio's Graph Assistant - answers questions about the user's schema and
+# queries with a model you choose; off unless ai_provider is set. The API key
+# stays on the server. The assistant sees the schema, the editor's query and
+# its timings, never the data.
+#   "anthropic": the Claude API (key from console.anthropic.com)
+#   "openai":    any OpenAI-compatible Chat Completions endpoint: OpenAI,
+#                Azure OpenAI, Ollama, LM Studio, vLLM, OpenRouter, ...
+# Env: TRAVERSE_AI_PROVIDER, TRAVERSE_AI_API_KEY, TRAVERSE_AI_MODEL,
+#      TRAVERSE_AI_BASE_URL, TRAVERSE_AI_MAX_TOKENS, TRAVERSE_AI_EFFORT
+# ai_provider = "anthropic"
+# ai_api_key = "sk-ant-..."
+# Model: default "claude-opus-5-5" on anthropic; required on openai
+# ai_model = "claude-opus-5-5"
+# Base URL: default https://api.anthropic.com / https://api.openai.com/v1;
+# for a local model, e.g. Ollama: "http://localhost:11434/v1"
+# ai_base_url = "http://localhost:11434/v1"
+# Output tokens per answer (default 64000 on anthropic, the endpoint's own on openai)
+# ai_max_tokens = 64000
+# Claude API effort: low, medium, high, xhigh or max (default: the model's)
+# ai_effort = "medium"

@@ -1,0 +1,7 @@
+target/
+.git/
+studio/node_modules/
+benchmarks/data/
+tmp_examples/
+dotnet/
+*.md

@@ -1,0 +1,5 @@
+[*.cs]
+# test names read as sentences
+dotnet_diagnostic.CA1707.severity = none
+# culture-free test data (int.ToString)
+dotnet_diagnostic.CA1305.severity = none

@@ -1,0 +1,23 @@
+[package]
+name = "traverse-admin"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Builds Traverse .tvdb database files from CSV files or a Cypher script"
+
+[[bin]]
+name = "traverse-admin"
+path = "src/main.rs"
+
+[dependencies]
+traverse-core = { path = "../traverse-core" }
+traverse-cypher = { path = "../traverse-cypher" }
+csv = { workspace = true }
+clap = { workspace = true }
+indicatif = { workspace = true }
+
+[lints]
+workspace = true

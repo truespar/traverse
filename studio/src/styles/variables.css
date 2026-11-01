@@ -1,0 +1,191 @@
+/* ============================================================
+   Traverse Studio - Design Tokens
+   Slate-forward palette with sky-blue accents.
+   Built on the TrueSpar Design System surfaces.
+   ============================================================ */
+
+:root {
+  /* -- TrueSpar Primitives ------------------------------------ */
+  --ts-color-abyss:            #0A1118;
+  --ts-color-deep-water:       #121C26;
+  --ts-color-current:          #1A2834;
+  --ts-color-border-dark:      #2A3A48;
+  --ts-color-warm-canvas:      #ECE8E0;
+  --ts-color-slate-water:      #7E8C9C;
+  --ts-color-deep-slate:       #4A5565;
+  --ts-color-mist:             #5A6A78;
+  --ts-color-warm-linen:       #F5F5F7;
+  --ts-color-white:            #FFFFFF;
+
+  /* -- Fonts ------------------------------------------------ */
+  --tv-font-sans: 'Inter Variable', 'Inter', ui-sans-serif, system-ui, -apple-system,
+                  BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --tv-font-mono: 'JetBrains Mono Variable', 'JetBrains Mono', ui-monospace, SFMono-Regular,
+                  Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+
+  /* -- Font Sizes ------------------------------------------- */
+  --tv-font-size-xs:   0.8125rem;  /* 13px */
+  --tv-font-size-sm:   0.875rem;   /* 14px */
+  --tv-font-size-base: 0.9375rem;  /* 15px */
+  --tv-font-size-lg:   1.0625rem;  /* 17px */
+
+  /* -- Radii ------------------------------------------------ */
+  --tv-radius-sm:  4px;
+  --tv-radius-md:  6px;
+  --tv-radius-lg:  8px;
+  --tv-radius-xl:  12px;
+
+  /* -- Layout ----------------------------------------------- */
+  --tv-activitybar-width: 55px;
+  --tv-header-height: 44px;
+  --tv-sidebar-width: 260px;
+}
+
+/* ==============================================================
+   DARK THEME (default)
+   ============================================================== */
+:root,
+[data-theme="dark"] {
+  color-scheme: dark;
+  /* Backgrounds */
+  --tv-bg-base:     #0A1118;
+  --tv-bg-surface:  #121C26;
+  --tv-bg-elevated: #1A2834;
+  --tv-bg-inset:    #070C10;
+  --tv-bg-hover:    rgba(255, 255, 255, 0.06);
+  --tv-bg-overlay:  rgba(10, 17, 24, 0.75);
+
+  /* Text */
+  --tv-text-primary:   #ECE8E0;
+  --tv-text-secondary: #7E8C9C;
+  --tv-text-muted:     #5A6A78;
+  --tv-text-inverse:   #0A1118;
+
+  /* Borders */
+  --tv-border-default: #2A3A48;
+  --tv-border-subtle:  rgba(78, 104, 120, 0.25);
+  --tv-border-strong:  #3A4A58;
+  --tv-border-focus:   #0EA5E9;
+
+  /* Accent (sky - used sparingly) */
+  --tv-accent:        #0EA5E9;
+  --tv-accent-hover:  #38BDF8;
+  --tv-accent-active: #0284C7;
+  --tv-accent-subtle: rgba(14, 165, 233, 0.16);
+  --tv-accent-text:   #38BDF8;
+
+  /* Status */
+  --tv-status-success:        #22C55E;
+  --tv-status-warning:        #D4952B;
+  --tv-status-error:          #E05652;
+  --tv-status-error-hover:    #C43E3A;
+  --tv-status-info:           #4A8FD4;
+  --tv-status-success-subtle: rgba(34, 197, 94, 0.12);
+  --tv-status-warning-subtle: rgba(212, 149, 43, 0.12);
+  --tv-status-error-subtle:   rgba(224, 86, 82, 0.12);
+
+  /* Graph node palette */
+  --tv-node-1:  #38BDF8;
+  --tv-node-2:  #5B9BD5;
+  --tv-node-3:  #E8716E;
+  --tv-node-4:  #D4952B;
+  --tv-node-5:  #a78bfa;
+  --tv-node-6:  #7DD3FC;
+  --tv-node-7:  #7BB4E0;
+  --tv-node-8:  #f87171;
+  --tv-node-9:  #60a5fa;
+  --tv-node-10: #818cf8;
+
+  /* Graph edges */
+  --tv-edge-default: #2A3A48;
+  --tv-edge-hover:   #5A6A78;
+
+  /* Sigma canvas */
+  --tv-graph-bg:         #121C26;
+  --tv-graph-label:      #ECE8E0;
+  --tv-graph-edge-label: #7E8C9C;
+
+  /* Danger (alias for status-error, used in chat/forms) */
+  --tv-text-danger:     var(--tv-status-error);
+  --tv-bg-danger-subtle: var(--tv-status-error-subtle);
+
+  /* Shadows */
+  --tv-shadow-sm: 0 1px 2px  rgba(0, 0, 0, 0.30);
+  --tv-shadow-md: 0 4px 8px  rgba(0, 0, 0, 0.35);
+  --tv-shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.40);
+  --tv-shadow-xl: 0 16px 48px rgba(0, 0, 0, 0.50);
+}
+
+/* ==============================================================
+   LIGHT THEME
+   ============================================================== */
+[data-theme="light"] {
+  color-scheme: light;
+  /* Backgrounds */
+  --tv-bg-base:     #F5F5F7;
+  --tv-bg-surface:  #FFFFFF;
+  --tv-bg-elevated: #FFFFFF;
+  --tv-bg-inset:    #F5F5F7;
+  --tv-bg-hover:    rgba(0, 0, 0, 0.04);
+  --tv-bg-overlay:  rgba(0, 0, 0, 0.35);
+
+  /* Text */
+  --tv-text-primary:   #0A1118;
+  --tv-text-secondary: #4A5565;
+  --tv-text-muted:     #7E8C9C;
+  --tv-text-inverse:   #ECE8E0;
+
+  /* Borders */
+  --tv-border-default: #E0E4E8;
+  --tv-border-subtle:  rgba(0, 0, 0, 0.06);
+  --tv-border-strong:  #B8BEC6;
+  --tv-border-focus:   #0369A1;
+
+  /* Accent (deep-sky - used sparingly) */
+  --tv-accent:        #0369A1;
+  --tv-accent-hover:  #075985;
+  --tv-accent-active: #0C4A6E;
+  --tv-accent-subtle: rgba(3, 105, 161, 0.08);
+  --tv-accent-text:   #0369A1;
+
+  /* Status */
+  --tv-status-success:        #15803D;
+  --tv-status-warning:        #8A6520;
+  --tv-status-error:          #B83030;
+  --tv-status-error-hover:    #9A2828;
+  --tv-status-info:           #2A6AA8;
+  --tv-status-success-subtle: rgba(21, 128, 61, 0.08);
+  --tv-status-warning-subtle: rgba(138, 101, 32, 0.08);
+  --tv-status-error-subtle:   rgba(184, 48, 48, 0.08);
+
+  /* Graph node palette */
+  --tv-node-1:  #0369A1;
+  --tv-node-2:  #2A6AA8;
+  --tv-node-3:  #B83030;
+  --tv-node-4:  #8A6520;
+  --tv-node-5:  #7C3AED;
+  --tv-node-6:  #0284C7;
+  --tv-node-7:  #3B82C4;
+  --tv-node-8:  #D44040;
+  --tv-node-9:  #4A90D0;
+  --tv-node-10: #6366f1;
+
+  /* Graph edges */
+  --tv-edge-default: #D0D5DA;
+  --tv-edge-hover:   #8A929C;
+
+  /* Sigma canvas */
+  --tv-graph-bg:         #FFFFFF;
+  --tv-graph-label:      #0A1118;
+  --tv-graph-edge-label: #4A5565;
+
+  /* Danger (alias for status-error, used in chat/forms) */
+  --tv-text-danger:     var(--tv-status-error);
+  --tv-bg-danger-subtle: var(--tv-status-error-subtle);
+
+  /* Shadows */
+  --tv-shadow-sm: 0 1px 2px  rgba(0, 0, 0, 0.08);
+  --tv-shadow-md: 0 4px 8px  rgba(0, 0, 0, 0.10);
+  --tv-shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.12);
+  --tv-shadow-xl: 0 16px 48px rgba(0, 0, 0, 0.16);
+}

@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Traverse.Bolt.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/Traverse.Bolt/Traverse.Bolt.csproj" />
+  </ItemGroup>
+
+</Project>

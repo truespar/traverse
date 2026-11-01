@@ -1,0 +1,8 @@
+bin/
+obj/
+*.nupkg
+runtimes/
+# A prebuilt traverse_ffi.dll may live here so .NET consumers build without a Rust
+# toolchain: cargo build --release -p traverse-ffi, then copy target/release/traverse_ffi.dll
+# into src/Traverse.Embedded/runtimes/win-x64/native/.
+!src/Traverse.Embedded/runtimes/

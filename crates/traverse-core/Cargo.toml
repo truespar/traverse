@@ -1,0 +1,67 @@
+[package]
+name = "traverse-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Core graph data structures and in-memory storage for Traverse"
+
+[features]
+default = ["compression", "file-locking", "mmap"]
+compression = ["dep:lz4_flex"]
+file-locking = ["dep:fs2"]
+# `mmap` gates the file-backed page reader (memmap2). Disabled on wasm32,
+# which uses the in-memory `Vec<u8>` path instead.
+# Algorithms / cypher / graph mutations don't depend on this - only the
+# tvdb-from-disk loader does.
+mmap = ["dep:memmap2"]
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+smallvec = { workspace = true }
+rkyv = { workspace = true }
+memmap2 = { workspace = true, optional = true }
+crc32fast = { workspace = true }
+lz4_flex = { workspace = true, optional = true }
+fs2 = { workspace = true, optional = true }
+rustc-hash = { workspace = true }
+rayon = { workspace = true }
+web-time = { workspace = true }
+
+# durable rename (MoveFileExW write-through) for snapshot installs
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+criterion = { workspace = true }
+traverse-cypher = { path = "../traverse-cypher" }
+
+[[bench]]
+name = "index_bench"
+harness = false
+
+[[bench]]
+name = "insert_bench"
+harness = false
+
+[[bench]]
+name = "query_bench"
+harness = false
+
+[[bench]]
+name = "concurrent_bench"
+harness = false
+
+# Custom-harness test: re-exec ourselves as the "crash victim" via env-var
+# dispatch (libtest's argv parser would reject any args we'd want to pass).
+[[test]]
+name = "real_kill"
+harness = false
+
+[lints]
+workspace = true

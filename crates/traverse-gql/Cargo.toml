@@ -1,0 +1,51 @@
+[package]
+name = "traverse-gql"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "ISO/IEC 39075 GQL parser for Traverse"
+
+[dependencies]
+# Shared AST target - the GQL parser lowers into the same statement
+# representation the openCypher path produces, so the executor and
+# planner never need to know which dialect a query came from.
+traverse-cypher = { path = "../traverse-cypher" }
+# `exec` takes `&mut dyn GraphView` so embedders (the server's
+# dialect route and the language bindings) can run the parse ->
+# lower -> execute pipeline in one call.
+traverse-core = { path = "../traverse-core", default-features = false }
+recursive = { workspace = true }
+# `web_time::Instant` is `std::time::Instant` on native targets and a
+# performance.now()-backed shim on wasm32 (std Instant panics there).
+# Needed because `execute_timed` measures the parse+lower phase, and
+# this crate ships in the browser build (traverse-wasm) for GQL.
+web-time = { workspace = true }
+
+[dev-dependencies]
+# Pure Gherkin parser used by the TCK harness to walk .feature files.
+gherkin = "0.16"
+# Property-based testing - generates randomised inputs across a
+# strategy space to verify invariants the hand-written tests miss
+# (parser no-panic, expression evaluation laws, lowering idempotence).
+proptest = "1.12"
+# Performance benchmarks - protects against regressions in parse /
+# lower throughput. Run with `cargo bench -p traverse-gql`.
+criterion = { workspace = true }
+
+[[bench]]
+name = "parse"
+harness = false
+
+[[bench]]
+name = "lower"
+harness = false
+
+[[bench]]
+name = "quantified_paths"
+harness = false
+
+[lints]
+workspace = true

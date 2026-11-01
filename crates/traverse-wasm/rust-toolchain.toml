@@ -1,0 +1,8 @@
+# Pinned to nightly because the threaded WASM build requires
+# `-Z build-std=panic_abort,std`. This pin is scoped to the
+# traverse-wasm crate only - the rest of the workspace builds on
+# stable. build.sh sets the target flags; its comments explain each one.
+[toolchain]
+channel = "nightly"
+components = ["rust-src"]
+targets = ["wasm32-unknown-unknown"]

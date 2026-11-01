@@ -1,0 +1,68 @@
+[package]
+name = "traverse-ml-wasm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "WebAssembly bindings for traverse-ml - graph-ML inference in a browser tab"
+
+[lib]
+# `cdylib` for wasm-bindgen output; `rlib` so other crates can depend
+# on us if they want to compose the inference surface.
+crate-type = ["cdylib", "rlib"]
+
+# Separate from `traverse-wasm` deliberately. ML inference adds ~10 MB
+# (CPU) to ~30 MB (WGPU) on top of the 4 MB Cypher engine. Studio users
+# who only run Cypher shouldn't pay that download cost.
+
+[features]
+default = ["cpu"]
+# CPU (NdArray) inference. Smaller artifact (~10 MB release).
+cpu = ["traverse-ml/cpu"]
+# WGPU inference. Larger artifact (~30 MB release) but uses the GPU
+# via WebGPU. Requires Chrome 113+ or Firefox Nightly with WebGPU
+# enabled, and a hosting page with COOP/COEP headers.
+wgpu = ["traverse-ml/wgpu"]
+
+[dependencies]
+traverse-ml = { path = "../traverse-ml", default-features = false }
+# Direct burn dep so we can name `burn::backend::Wgpu` / `NdArray` in
+# the predict entry. Features come from traverse-ml's `cpu` / `wgpu`
+# features, which forward to burn's matching feature set.
+burn = { version = "0.21", default-features = false }
+serde = { workspace = true }
+serde_json = "1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+serde-wasm-bindgen = "0.6"
+console_error_panic_hook = "0.1"
+# Same three-getrandom-version pin as traverse-ml - Burn's transitive
+# tree drags all three in on wasm32. See traverse-ml/Cargo.toml for
+# the rationale.
+getrandom = { version = "0.4", features = ["wasm_js"] }
+getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+
+# WASM smoke-test infra (only for the WASM target; native is unaffected).
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
+js-sys = "0.3"
+
+[package.metadata.wasm-pack.profile.release]
+# Same wasm-opt flags as traverse-wasm: strip the producers and debug-info name sections.
+wasm-opt = [
+    "-O3",
+    "--enable-bulk-memory",
+    "--enable-mutable-globals",
+    "--enable-sign-ext",
+    "--enable-nontrapping-float-to-int",
+    "--enable-reference-types",
+    "--strip-debug",
+    "--strip-producers",
+]
+
+[lints]
+workspace = true

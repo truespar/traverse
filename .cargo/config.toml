@@ -1,0 +1,4 @@
+# Release binaries shouldn't carry the build machine's directory layout or username in panic
+# messages, tracing call sites or debug info. Pass `--remap-path-prefix` for the checkout,
+# CARGO_HOME and RUSTUP_HOME in RUSTFLAGS when building a release; day-to-day builds don't need
+# it.

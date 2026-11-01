@@ -1,0 +1,15 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Traverse.Embedded/Traverse.Embedded.csproj" />
+    <Project Path="src/Traverse.Grpc/Traverse.Grpc.csproj" />
+    <Project Path="src/Traverse.Bolt/Traverse.Bolt.csproj" />
+    <Project Path="src/Traverse.Bench/Traverse.Bench.csproj" />
+    <Project Path="src/Traverse.Http/Traverse.Http.csproj" />
+  </Folder>
+  <Folder Name="/test/">
+    <Project Path="test/Traverse.Embedded.Tests/Traverse.Embedded.Tests.csproj" />
+    <Project Path="test/Traverse.Grpc.Tests/Traverse.Grpc.Tests.csproj" />
+    <Project Path="test/Traverse.Bolt.Tests/Traverse.Bolt.Tests.csproj" />
+    <Project Path="test/Traverse.Http.Tests/Traverse.Http.Tests.csproj" />
+  </Folder>
+</Solution>

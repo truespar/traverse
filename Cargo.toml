@@ -1,0 +1,121 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/traverse-core",
+    "crates/traverse-codec",
+    "crates/traverse-cypher",
+    "crates/traverse-gql",
+    "crates/traverse-server",
+    "crates/traverse-cli",
+    "crates/traverse-ffi",
+    "crates/traverse-bench",
+    "crates/traverse-admin",
+    "crates/traverse-python",
+    "crates/traverse-java",
+    "crates/traverse-node",
+    "crates/traverse-wasm",
+    "crates/traverse-ml",
+    "crates/traverse-ml-wasm",
+]
+# Keep `cargo-fuzz` sub-crates out of the main workspace - their
+# `libfuzzer-sys` dependency requires nightly Rust and shouldn't
+# slow down regular `cargo build` / `cargo test` invocations.
+exclude = [
+    "crates/traverse-gql/fuzz",
+]
+
+[workspace.package]
+version = "0.9.0"
+edition = "2024"
+rust-version = "1.99.1"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/truespar/traverse"
+homepage = "https://truespar.com/traverse"
+
+[workspace.lints.clippy]
+# Engine and numeric code: wide internal helpers, nested generic types and index loops over
+# parallel arrays are deliberate here.
+too_many_arguments = "allow"
+type_complexity = "allow"
+needless_range_loop = "allow"
+# every `unsafe` block says why it's sound
+undocumented_unsafe_blocks = "warn"
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2.0"
+tracing = "0.1"
+smallvec = { version = "1.16", features = ["serde"] }
+rkyv = { version = "0.8", default-features = false, features = ["std", "alloc", "smallvec-1", "bytecheck"] }
+memmap2 = "0.9"
+crc32fast = "1.5"
+lz4_flex = "0.14"
+fs2 = "0.4"
+tempfile = "3.27"
+rustc-hash = "2"
+criterion = { version = "0.8", features = ["html_reports"] }
+clap = { version = "4", features = ["derive"] }
+rustyline = "19"
+comfy-table = "8"
+serde_json = "1"
+md-5 = "0.11"
+sha1 = "0.11"
+sha2 = "0.11"
+# `simd-unsafe` (on by default in 0.23) adds runtime-dispatched unsafe
+# AVX2/NEON paths; the volumes we encode don't justify the unsafe surface.
+base64 = { version = "0.23", default-features = false, features = ["std"] }
+rust_decimal = "1"
+quick-xml = "0.42"
+flate2 = "1"
+ureq = { version = "3", features = ["json"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+postgres = "0.19"
+arrow-array = "59"
+arrow-schema = "59"
+arrow-ipc = "59"
+tonic = { version = "0.14", features = ["gzip"] }
+prost = "0.14"
+uuid = { version = "1", features = ["v4"] }
+csv = "1.4"
+indicatif = "0.18"
+bcrypt = "0.19"
+# Payload encoding inside `traverse-codec`'s framed container (.tvmodel
+# files, the auth catalog). Replaced bincode, which is unmaintained
+# (RUSTSEC-2025-0141); its old payloads are read by traverse-codec's
+# built-in legacy decoder.
+postcard = { version = "1.1", default-features = false, features = ["use-std"] }
+axum = { version = "0.8", features = ["ws"] }
+tower-http = { version = "0.7", features = ["cors"] }
+rust-embed = "8"
+toml = "1"
+dashmap = "6"
+rayon = "1.12"
+# Drop-in std::time replacement that compiles on wasm32 (which has no
+# clock - `SystemTime::now()` / `Instant::now()` panic at runtime).
+# On native targets `web_time` delegates straight to `std::time` so
+# there's no overhead.
+web-time = "1.1"
+# Stack-safe recursion: `#[recursive]` grows the stack on the heap when a
+# recursive walker (parser, planner, optimizer, evaluator) nears exhaustion;
+# `stacker` is used directly for the one-shot deep-plan execution stack.
+# Both run on the current stack where psm cannot switch stacks (e.g. wasm32).
+recursive = "0.1"
+stacker = "0.1"
+
+# Full DWARF in every test binary and cdylib makes target/ balloon (each one carries a copy of
+# every dependency's debug info). `line-tables-only` keeps file/line in backtraces and panic
+# messages but drops variable/type info, so switch to `debug = true` when you need a debugger to
+# inspect locals. `unpacked` leaves debug info in the object files instead of copying it into
+# each linked artifact.
+[profile.dev]
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+# `unwind`, not `abort`: a panicking query must fail that query, not take down the server or a
+# host app embedding the FFI/PyO3/JNI/napi bindings (traverse-ffi's `catch_panic` relies on it).
+# Unwind tables cost some binary size.
+panic = "unwind"

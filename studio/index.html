@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="description" content="Traverse Studio - visual query editor and graph explorer for Traverse">
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0A1118">
+  <meta name="theme-color" media="(prefers-color-scheme: light)" content="#F5F5F7">
+  <!-- iOS "Add to Home Screen": launch fullscreen without Safari chrome. -->
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Traverse">
+  <meta name="mobile-web-app-capable" content="yes">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
+  <link rel="icon" href="/favicon.ico" sizes="48x48">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <title>Traverse Studio</title>
+  <script>
+    // Apply saved theme immediately to prevent flash. If the user has
+    // never explicitly chosen a theme, fall back to the OS preference
+    // rather than hard-coding dark.
+    var stored = localStorage.getItem('fg_theme');
+    var t = (stored === 'light' || stored === 'dark')
+      ? stored
+      : (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+    document.documentElement.setAttribute('data-theme', t);
+    document.documentElement.setAttribute('data-ag-theme-mode', t);
+  </script>
+</head>
+<body>
+  <!--
+    Pre-mount loading splash. Shown before Vue has booted; on the
+    `/try` (WASM) landing the JS bundle + ~5 MB WASM module take a
+    moment to initialize, and a blank page is jarring. The Vue app
+    removes this element after mounting via `clearBootSplash()` in
+    `main.ts`.
+  -->
+  <div id="tv-boot-splash">
+    <div class="tv-boot-card">
+      <div class="tv-boot-logo">
+        <svg viewBox="0 0 512 512" width="40" height="40" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <path d="M227.3 371.862V136.3H277.435L278.989 182.548L269.662 179.05C271.216 171.018 275.621 163.505 282.876 156.509C290.13 149.255 298.94 143.425 309.303 139.021C319.926 134.616 331.067 132.414 342.726 132.414C360.863 132.414 376.927 137.078 390.918 146.405C404.909 155.473 415.92 168.039 423.952 184.103C431.984 199.907 436 218.173 436 238.9C436 259.109 431.984 277.246 423.952 293.309C415.92 309.373 404.909 322.068 390.918 331.396C376.927 340.464 360.992 344.998 343.115 344.998C331.197 344.998 319.797 342.666 308.915 338.002C298.033 333.339 288.835 327.38 281.321 320.125C273.807 312.611 269.014 304.58 266.941 296.03L279.378 290.589V427L227.3 371.862ZM331.844 299.916C342.467 299.916 351.795 297.325 359.827 292.143C368.118 286.961 374.595 279.836 379.259 270.768C383.922 261.441 386.254 250.818 386.254 238.9C386.254 226.723 383.922 216.1 379.259 207.032C374.595 197.705 368.247 190.45 360.215 185.268C352.183 180.087 342.726 177.496 331.844 177.496C321.222 177.496 311.765 180.087 303.474 185.268C295.442 190.45 289.094 197.705 284.43 207.032C279.767 216.1 277.435 226.723 277.435 238.9C277.435 250.818 279.767 261.441 284.43 270.768C289.094 279.836 295.442 286.961 303.474 292.143C311.765 297.325 321.222 299.916 331.844 299.916Z" fill="currentColor"/>
+          <path d="M115.253 342.277V213.638V85H166.942V213.638V342.277H115.253ZM76 184.102V137.077H210.47V184.102H76Z" fill="currentColor"/>
+        </svg>
+      </div>
+      <div class="tv-boot-title">Traverse</div>
+      <div class="tv-boot-spinner" aria-hidden="true"></div>
+      <div id="tv-boot-status" class="tv-boot-status">Loading...</div>
+    </div>
+  </div>
+  <style>
+    /* Splash styles live inline so they apply before any CSS asset
+       has been fetched. Variables intentionally hardcoded - the
+       theme switcher in `main.ts` runs synchronously above and sets
+       `data-theme` but the design tokens module loads after this
+       splash already needs to render. */
+    #tv-boot-splash {
+      position: fixed;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+      background: #0A1118;
+      color: #E6EEF8;
+      font-family: 'Inter Variable', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      z-index: 1000;
+    }
+    [data-theme='light'] #tv-boot-splash {
+      background: #F5F5F7;
+      color: #1B1F23;
+    }
+    .tv-boot-card {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 16px;
+    }
+    .tv-boot-logo {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 64px;
+      height: 64px;
+      border-radius: 12px;
+      background: #2E7CF6;
+      color: #fff;
+    }
+    .tv-boot-title {
+      font-size: 20px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+    }
+    .tv-boot-spinner {
+      width: 28px;
+      height: 28px;
+      border: 3px solid rgba(255, 255, 255, 0.12);
+      border-top-color: #2E7CF6;
+      border-radius: 50%;
+      animation: tv-boot-spin 0.9s linear infinite;
+    }
+    [data-theme='light'] .tv-boot-spinner {
+      border-color: rgba(0, 0, 0, 0.08);
+      border-top-color: #2E7CF6;
+    }
+    .tv-boot-status {
+      font-size: 13px;
+      color: #8A95A3;
+      min-height: 18px;
+    }
+    [data-theme='light'] .tv-boot-status {
+      color: #5C6470;
+    }
+    @keyframes tv-boot-spin {
+      to { transform: rotate(360deg); }
+    }
+  </style>
+  <div id="app"></div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

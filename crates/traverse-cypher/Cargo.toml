@@ -1,0 +1,81 @@
+[package]
+name = "traverse-cypher"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "openCypher query engine for Traverse"
+
+[features]
+default = []
+# Wire `traverse.ml.pipeline.nodeClassification.train` and `predict.stream`
+# through to the traverse-ml engine. Off by default because Burn + CubeCL
+# adds ~100 transitive crates and ~10x the compile time of the base
+# Cypher engine. The pipeline-configuration procedures (`create`,
+# `addNodeProperty`, etc.) work without this feature - they just store
+# state; `train` returns a clear "not built with ml" error when off.
+ml = ["dep:traverse-ml", "dep:burn"]
+# `ml` on NVIDIA GPUs too, chosen per call or by the server default at runtime.
+ml-cuda = ["ml", "traverse-ml/cuda"]
+
+[dependencies]
+traverse-core = { path = "../traverse-core", default-features = false, features = ["compression"] }
+traverse-ml = { path = "../traverse-ml", default-features = false, features = ["cpu"], optional = true }
+burn = { version = "0.21", default-features = false, optional = true }
+serde_json = { workspace = true }
+serde = { workspace = true }
+traverse-codec = { path = "../traverse-codec" }
+md-5 = { workspace = true }
+sha1 = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
+rust_decimal = { workspace = true }
+quick-xml = { workspace = true }
+flate2 = { workspace = true }
+arrow-array = { workspace = true }
+arrow-schema = { workspace = true }
+arrow-ipc = { workspace = true }
+thiserror = { workspace = true }
+regex = "1"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+chrono-tz = "0.10"
+rustc-hash = { workspace = true }
+rayon = "1.12"
+csv = { workspace = true }
+web-time = { workspace = true }
+unicode-normalization = "0.1"
+recursive = { workspace = true }
+stacker = { workspace = true }
+
+# Outbound connectivity (LOAD CSV over http(s), apoc.load.json/jsonParams,
+# apoc.load.jdbc, apoc.spatial geocoding). wasm32 has no socket API -
+# `postgres` drags in tokio/mio which hard-fail to compile there, and
+# rusqlite bundles C sqlite. Native-only; the wasm build compiles cfg
+# stubs that return a runtime error instead (see src/operators/call/apoc/,
+# src/operators/load_csv.rs).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ureq = { workspace = true }
+rusqlite = { workspace = true }
+postgres = { workspace = true }
+
+[dev-dependencies]
+rusqlite = { workspace = true }
+tempfile = { workspace = true }
+serde_json = { workspace = true }
+cucumber = "0.23"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+futures = "0.3"
+criterion = { workspace = true }
+
+[[test]]
+name = "tck"
+harness = false
+
+[[bench]]
+name = "cypher_index_bench"
+harness = false
+
+[lints]
+workspace = true

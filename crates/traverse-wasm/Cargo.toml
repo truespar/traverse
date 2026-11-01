@@ -1,0 +1,66 @@
+[package]
+name = "traverse-wasm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "WebAssembly bindings for the Traverse graph engine - Cypher + 32 GDS algorithms in a browser tab"
+
+[lib]
+# `cdylib` is required for wasm-bindgen output (`.wasm` shared library).
+# `rlib` lets downstream Rust crates depend on this for native testing.
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+# Multi-threaded variant - requires building with `wasm-pack build
+# --target web -- -Z build-std=panic_abort,std` on nightly Rust.
+# Without this feature the engine still works on wasm32 but runs all
+# algorithms single-threaded.
+threads = ["dep:wasm-bindgen-rayon"]
+
+[dependencies]
+traverse-core = { path = "../traverse-core", default-features = false, features = ["compression"] }
+traverse-cypher = { path = "../traverse-cypher" }
+# ISO/IEC 39075 GQL dialect: parse + lower onto the Cypher AST and run
+# through the engine that's already in the bundle. Parser-only crate,
+# so the size cost is small. Catalog statements (CREATE GRAPH, USE)
+# surface the lowerer's "not yet supported" error - right answer for a
+# single-graph in-browser session.
+traverse-gql = { path = "../traverse-gql" }
+serde = { workspace = true }
+serde_json = "1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+serde-wasm-bindgen = "0.6"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["console", "Performance", "Window", "WorkerGlobalScope"] }
+console_error_panic_hook = "0.1"
+# `getrandom` with the `js` feature so anything in the dep tree that
+# calls `getrandom::getrandom()` works in the browser. Cypher itself
+# doesn't use it; this insures against future deps.
+getrandom = { version = "0.2", features = ["js"] }
+# Threading (gated by the `threads` feature).
+wasm-bindgen-rayon = { version = "1.3", optional = true }
+
+[package.metadata.wasm-pack.profile.release]
+# wasm-opt with explicit flags: the defaults reject bulk-memory / threads / mutable-globals ops,
+# so `--enable-*` keeps the validator happy. The strip flags drop the `producers` section and the
+# debug-info name section, which makes the .wasm about 20% smaller.
+wasm-opt = [
+    "-O3",
+    "--enable-bulk-memory",
+    "--enable-mutable-globals",
+    "--enable-threads",
+    "--enable-sign-ext",
+    "--enable-nontrapping-float-to-int",
+    "--enable-reference-types",
+    "--strip-debug",
+    "--strip-producers",
+]
+
+[lints]
+workspace = true

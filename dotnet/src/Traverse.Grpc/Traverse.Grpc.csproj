@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Traverse.Grpc</RootNamespace>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <IsPackable>true</IsPackable>
+    <PackageId>Traverse.Grpc</PackageId>
+    <Description>gRPC client for the Traverse graph database.</Description>
+    <PackageTags>graph;database;cypher;traverse;grpc</PackageTags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Google.Protobuf" />
+    <PackageReference Include="Grpc.Net.Client" />
+    <PackageReference Include="Grpc.Tools" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Protobuf Include="../../../crates/traverse-server/proto/traverse.proto"
+              GrpcServices="Client"
+              ProtoRoot="../../../crates/traverse-server/proto"
+              Access="Internal" />
+  </ItemGroup>
+
+</Project>

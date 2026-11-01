@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "traverse-http"
+version = "0.9.0"
+description = "Official Python HTTP client for Traverse - Truespar's in-memory graph database. Cypher queries, schema introspection, CSV import, database management."
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+requires-python = ">=3.10"
+dependencies = ["requests>=2.28"]
+authors = [{ name = "Truespar" }]
+keywords = ["graph", "database", "traverse", "truespar", "cypher", "graph-database"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database :: Front-Ends",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://truespar.com/traverse/docs"
+Documentation = "https://truespar.com/traverse/docs"
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/traverse_http"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

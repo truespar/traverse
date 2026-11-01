@@ -1,0 +1,50 @@
+{
+  "name": "traverse-studio",
+  "version": "0.9.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "build:server": "vue-tsc --noEmit -p tsconfig.server.json && vite build --mode server",
+    "build:wasm": "vue-tsc --noEmit && vite build --mode wasm --outDir dist-wasm --emptyOutDir",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@fontsource-variable/inter": "^5.2.8",
+    "@fontsource-variable/jetbrains-mono": "^5.2.8",
+    "@sigma/edge-curve": "^3.1.0",
+    "@sigma/export-image": "^3.0.0",
+    "@truespar/traverse-wasm": "file:../crates/traverse-wasm/js",
+    "@vue/devtools-api": "^8.2.1",
+    "chart.js": "^4.5.1",
+    "d3-dispatch": "^3.0.1",
+    "d3-force": "^3.0.0",
+    "d3-quadtree": "^3.0.1",
+    "d3-timer": "^3.0.1",
+    "graphology": "^0.26.0",
+    "graphology-layout-forceatlas2": "0.10.1",
+    "graphology-types": "^0.24.8",
+    "markstream-vue": "^2.0.1",
+    "monaco-editor": "^0.57.0",
+    "pinia": "^4.0.3",
+    "sigma": "^3.0.2",
+    "vue": "^3.5.29",
+    "vue-chartjs": "^5.3.3",
+    "vue-router": "^5.0.3"
+  },
+  "devDependencies": {
+    "@types/d3-force": "^3.0.10",
+    "@vitejs/plugin-vue": "^6.0.4",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.12",
+    "vite-plugin-compression2": "^2.5.0",
+    "vue-tsc": "^3.2.5"
+  },
+  "overrides": {
+    "dompurify": "^3.4.14"
+  }
+}

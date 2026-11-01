@@ -1,0 +1,43 @@
+{
+  "name": "@truespar/traverse-node",
+  "version": "0.9.0",
+  "license": "MIT OR Apache-2.0",
+  "description": "Embedded Traverse graph database for Node.js: the engine in your process, no server",
+  "keywords": [
+    "graph",
+    "database",
+    "cypher",
+    "gql",
+    "embedded",
+    "traverse"
+  ],
+  "homepage": "https://truespar.com/traverse/docs",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "napi": {
+    "binaryName": "traverse-node",
+    "targets": [
+      "x86_64-pc-windows-msvc",
+      "x86_64-unknown-linux-gnu"
+    ]
+  },
+  "scripts": {
+    "build": "napi build --platform --release --manifest-path ../../crates/traverse-node/Cargo.toml --output-dir .",
+    "build:debug": "napi build --platform --manifest-path ../../crates/traverse-node/Cargo.toml --output-dir .",
+    "test": "node tests/traverse.test.js"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "3.10.8"
+  }
+}

@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>Traverse.Bench</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Traverse.Grpc/Traverse.Grpc.csproj" />
+    <ProjectReference Include="../Traverse.Bolt/Traverse.Bolt.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Neo4j.Driver" />
+  </ItemGroup>
+
+</Project>

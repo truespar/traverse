@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- TvdbFactory builds .tvdb files with the embedded package: native library from
+       TRAVERSE_FFI_LIB, like Traverse.Embedded.Tests -->
+  <PropertyGroup>
+    <RootNamespace>Traverse.Http.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/Traverse.Http/Traverse.Http.csproj" />
+    <ProjectReference Include="../../src/Traverse.Embedded/Traverse.Embedded.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,7 @@
+# Same WASM build cfg as traverse-ml - getrandom 0.4 requires its
+# `wasm_js` Cargo feature on wasm32 (not a cfg flag), and we drag in
+# all three getrandom versions via Burn's transitive tree.
+#
+# Empty file kept so callers running `cargo build --target wasm32`
+# from this crate's directory get the same getrandom resolution as
+# the workspace-level build. Cargo features take care of the rest.

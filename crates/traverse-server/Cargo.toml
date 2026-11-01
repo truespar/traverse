@@ -1,0 +1,91 @@
+[package]
+name = "traverse-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Traverse database server"
+
+[features]
+# `gql` is on by default so every standard build ships the ISO/IEC 39075 dialect. Lean builds
+# that don't want the extra parser pass `--no-default-features` and re-add what they need.
+default = ["native-alloc", "gql", "traverse-core/default"]
+native-alloc = ["dep:mimalloc", "dep:libmimalloc-sys", "dep:tracing-appender"]
+tls = ["dep:tokio-rustls", "dep:rustls-pki-types"]
+grpc = ["dep:tonic", "dep:tonic-prost", "dep:prost", "dep:uuid", "dep:dashmap", "dep:sha2"]
+mcp = []
+# ISO/IEC 39075 GQL dialect. Adds the `X-Query-Dialect: gql` header
+# route that parses the request via `traverse-gql`, lowers it into a
+# Cypher AST, and executes through the shared engine. Compile-time
+# opt-in so embedded/lean builds stay slim.
+gql = ["dep:traverse-gql"]
+# ML pipelines (`traverse.ml.pipeline.*` Cypher procedures). Wires `traverse-cypher`'s `ml`
+# feature through, which pulls Burn + CubeCL (~100 transitive crates) into the build. Off by
+# default so lean and embedded builds stay slim; release server builds turn it on.
+ml = ["traverse-cypher/ml"]
+# `ml` plus NVIDIA GPUs (Burn's CUDA backend). The driver and NVRTC are loaded at runtime, so the
+# binary still starts, and trains on the CPU, on machines without them.
+ml-cuda = ["ml", "traverse-cypher/ml-cuda"]
+
+[dependencies]
+traverse-core = { path = "../traverse-core", default-features = false }
+traverse-cypher = { path = "../traverse-cypher" }
+traverse-gql = { path = "../traverse-gql", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "signal", "sync", "time", "fs"] }
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = { version = "0.2", optional = true }
+thiserror.workspace = true
+bytes = "1"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+tokio-rustls = { version = "0.26", optional = true, default-features = false, features = ["ring", "tls12"] }
+rustls-pki-types = { version = "1", optional = true }
+tonic = { workspace = true, optional = true }
+tonic-prost = { version = "0.14", optional = true }
+prost = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+tokio-stream = "0.1"
+tokio-util = { version = "0.7", features = ["io"] }
+dashmap = { workspace = true, optional = true }
+mimalloc = { version = "0.1", optional = true }
+libmimalloc-sys = { version = "0.1", features = ["extended", "v2"], optional = true }
+rayon = "1.12"
+serde.workspace = true
+serde_json.workspace = true
+bcrypt = { workspace = true }
+traverse-codec = { path = "../traverse-codec" }
+axum = { workspace = true }
+tower-http = { workspace = true }
+http-body-util = "0.1"
+hyper-util = { version = "0.1", features = ["tokio", "server-auto", "service"] }
+rust-embed = { workspace = true }
+clap = { workspace = true }
+csv = { workspace = true }
+toml = { workspace = true }
+ureq = { workspace = true }
+getrandom = "0.4"
+base64 = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.8"
+
+[build-dependencies]
+tonic-prost-build = "0.14"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "macros", "signal", "sync", "test-util", "time"] }
+tonic.workspace = true
+prost.workspace = true
+tokio-stream = "0.1"
+tempfile.workspace = true
+
+# custom harness: the test re-runs itself as the process it kills
+[[test]]
+name = "real_kill"
+harness = false
+
+[lints]
+workspace = true

@@ -1,0 +1,71 @@
+/* Traverse Studio - Base Styles
+   Built on the TrueSpar Design System. */
+@import './variables.css';
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
+  font-size: inherit;
+}
+
+html, body, #app {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--tv-font-sans);
+  font-size: var(--tv-font-size-base);
+  line-height: 1.5;
+  color: var(--tv-text-primary);
+  background-color: var(--tv-bg-base);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--tv-border-default);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--tv-text-muted);
+}
+
+/* Selection */
+::selection {
+  background: var(--tv-accent-subtle);
+  color: var(--tv-text-primary);
+}
+
+/* Focus visible */
+:focus-visible {
+  outline: 2px solid var(--tv-border-focus);
+  outline-offset: 2px;
+}
+
+/* Utility */
+.truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

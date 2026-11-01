@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Traverse.Bolt</RootNamespace>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <IsPackable>true</IsPackable>
+    <PackageId>Traverse.Bolt</PackageId>
+    <Description>Bolt driver for .NET, for Traverse and other Bolt servers: async, no dependencies, with connection pooling and streaming.</Description>
+    <PackageTags>graph;database;cypher;traverse;bolt;driver</PackageTags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Traverse.Bolt.Tests" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Loads the native library from TRAVERSE_FFI_LIB (run_binding_tests.sh sets it to the
+       cargo build of traverse-ffi) -->
+  <PropertyGroup>
+    <RootNamespace>Traverse.Embedded.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/Traverse.Embedded/Traverse.Embedded.csproj" />
+  </ItemGroup>
+
+</Project>

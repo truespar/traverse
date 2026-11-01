@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Traverse</RootNamespace>
+    <!-- LibraryImport's generated marshalling -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <IsPackable>true</IsPackable>
+    <PackageId>Traverse.Embedded</PackageId>
+    <Description>Embedded Traverse graph database for .NET: the engine runs in your process.</Description>
+    <PackageTags>graph;database;cypher;gql;traverse;embedded</PackageTags>
+  </PropertyGroup>
+
+  <!-- The native library: copy the release build of traverse-ffi here before packing -->
+  <ItemGroup>
+    <None Include="runtimes/win-x64/native/traverse_ffi.dll"
+          Pack="true"
+          PackagePath="runtimes/win-x64/native/"
+          Condition="Exists('runtimes/win-x64/native/traverse_ffi.dll')" />
+    <None Include="runtimes/linux-x64/native/libtraverse_ffi.so"
+          Pack="true"
+          PackagePath="runtimes/linux-x64/native/"
+          Condition="Exists('runtimes/linux-x64/native/libtraverse_ffi.so')" />
+  </ItemGroup>
+
+</Project>

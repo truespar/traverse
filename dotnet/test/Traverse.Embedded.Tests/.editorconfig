@@ -1,0 +1,4 @@
+[*.cs]
+# statements run without a token on purpose: with one each gets a native canceller, a path
+# CancellationTests covers
+dotnet_diagnostic.xUnit1051.severity = none

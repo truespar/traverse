@@ -1,0 +1,14 @@
+{
+  "name": "@truespar/traverse-http",
+  "version": "0.9.0",
+  "license": "MIT OR Apache-2.0",
+  "description": "Node.js HTTP client for the Traverse graph database server API",
+  "type": "module",
+  "exports": "./src/index.js",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "test": "node --test tests/client.test.js"
+  }
+}

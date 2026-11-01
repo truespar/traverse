@@ -1,0 +1,2 @@
+# addons: built by `npm run build`, or copied into npm/<platform>/ before publishing
+*.node

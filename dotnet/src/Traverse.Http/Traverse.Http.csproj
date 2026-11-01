@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <RootNamespace>Traverse.Http</RootNamespace>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <IsPackable>true</IsPackable>
+    <PackageId>Traverse.Http</PackageId>
+    <Description>HTTP client for the Traverse graph database management API. Manage databases, files, aliases, schema, and users over HTTP/HTTPS, with no external dependencies.</Description>
+    <PackageTags>graph;database;traverse;http;client;management</PackageTags>
+  </PropertyGroup>
+
+</Project>

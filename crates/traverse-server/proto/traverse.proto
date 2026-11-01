@@ -1,0 +1,350 @@
+syntax = "proto3";
+
+package traverse.v1;
+
+// -- Value types (mirrors CypherValue) --------------------------------
+
+message Value {
+  oneof kind {
+    bool null_value = 1;       // always true when set
+    bool bool_value = 2;
+    int64 int_value = 3;
+    double double_value = 4;
+    string string_value = 5;
+    ListValue list_value = 6;
+    MapValue map_value = 7;
+    NodeValue node_value = 8;
+    EdgeValue edge_value = 9;
+    PathValue path_value = 10;
+    bytes bytes_value = 11;
+    string temporal_value = 12; // ISO-8601 string for Date/Time/DateTime/Duration
+  }
+}
+
+message ListValue {
+  repeated Value values = 1;
+}
+
+message MapValue {
+  map<string, Value> entries = 1;
+}
+
+message NodeValue {
+  uint64 id = 1;
+  repeated string labels = 2;
+  map<string, Value> properties = 3;
+}
+
+message EdgeValue {
+  uint64 id = 1;
+  string edge_type = 2;
+  uint64 source = 3;
+  uint64 target = 4;
+  map<string, Value> properties = 5;
+}
+
+message PathValue {
+  repeated NodeValue nodes = 1;
+  repeated EdgeValue edges = 2;
+}
+
+// -- Query stats ------------------------------------------------------
+
+message QueryStats {
+  int64 nodes_created = 1;
+  int64 nodes_deleted = 2;
+  int64 relationships_created = 3;
+  int64 relationships_deleted = 4;
+  int64 properties_set = 5;
+  int64 labels_added = 6;
+  int64 labels_removed = 7;
+  int64 indexes_added = 8;
+  int64 indexes_removed = 9;
+  int64 constraints_added = 10;
+  int64 constraints_removed = 11;
+}
+
+// -- ExecuteQuery (server-streaming) ----------------------------------
+
+message ExecuteQueryRequest {
+  string query = 1;
+  map<string, Value> parameters = 2;
+  string transaction_id = 3; // empty = auto-commit
+  string database = 4;           // target database name (empty = default)
+  repeated string bookmarks = 5; // causal consistency bookmarks
+  string access_mode = 6;        // "r" or "w" (default "w")
+  int64 timeout_ms = 7;          // query timeout in milliseconds (0 = no timeout)
+  string impersonate_user = 8;   // impersonate a different user (logged, not enforced)
+  string notification_minimum_severity = 9;    // "WARNING", "INFORMATION", or "OFF" (default "WARNING")
+  repeated string notification_disabled_categories = 10; // e.g. ["PERFORMANCE", "HINT"]
+}
+
+message ExecuteQueryResponse {
+  oneof payload {
+    QueryHeader header = 1;
+    QueryRow row = 2;
+    QueryFooter footer = 3;
+  }
+}
+
+message QueryHeader {
+  repeated string columns = 1;
+}
+
+message QueryRow {
+  repeated Value values = 1;
+}
+
+message QueryFooter {
+  QueryStats stats = 1;
+  string query_type = 2; // "r", "w", "rw", "s"
+  string bookmark = 3;
+  string database = 4;                    // database name used
+  double t_first_ms = 5;                  // time to first row (ms)
+  double t_last_ms = 6;                   // time to last row (ms)
+  repeated Notification notifications = 7; // diagnostic notifications
+  Value plan = 8;                          // EXPLAIN/PROFILE output
+  bool contains_updates = 9;               // true when stats has any non-zero counter
+}
+
+message Notification {
+  string code = 1;
+  string title = 2;
+  string description = 3;
+  string severity = 4; // "INFORMATION" or "WARNING"
+}
+
+// -- Node CRUD --------------------------------------------------------
+
+message CreateNodeRequest {
+  repeated string labels = 1;
+  map<string, Value> properties = 2;
+  string transaction_id = 3;
+}
+
+message CreateNodeResponse {
+  NodeValue node = 1;
+}
+
+message GetNodeRequest {
+  uint64 id = 1;
+  string transaction_id = 2;
+}
+
+message GetNodeResponse {
+  NodeValue node = 1;
+}
+
+message DeleteNodeRequest {
+  uint64 id = 1;
+  bool detach = 2; // if true, delete edges too
+  string transaction_id = 3;
+}
+
+message DeleteNodeResponse {}
+
+// -- Edge CRUD --------------------------------------------------------
+
+message CreateEdgeRequest {
+  uint64 source = 1;
+  uint64 target = 2;
+  string edge_type = 3;
+  map<string, Value> properties = 4;
+  string transaction_id = 5;
+}
+
+message CreateEdgeResponse {
+  EdgeValue edge = 1;
+}
+
+message GetEdgeRequest {
+  uint64 id = 1;
+  string transaction_id = 2;
+}
+
+message GetEdgeResponse {
+  EdgeValue edge = 1;
+}
+
+message DeleteEdgeRequest {
+  uint64 id = 1;
+  string transaction_id = 2;
+}
+
+message DeleteEdgeResponse {}
+
+// -- Property updates -------------------------------------------------
+
+message UpdatePropertiesRequest {
+  oneof target {
+    uint64 node_id = 1;
+    uint64 edge_id = 2;
+  }
+  map<string, Value> properties = 3;
+  string transaction_id = 4;
+}
+
+message UpdatePropertiesResponse {}
+
+// -- Transactions -----------------------------------------------------
+
+message BeginTransactionRequest {
+  string database = 1;           // target database (empty = default)
+  repeated string bookmarks = 2; // causal consistency bookmarks
+  string access_mode = 3;        // "r" or "w" (default "w")
+  int64 timeout_ms = 4;          // transaction timeout in milliseconds (0 = no timeout)
+  map<string, string> metadata = 5; // transaction metadata
+  string impersonate_user = 6;   // impersonate a different user (logged, not enforced)
+}
+
+message BeginTransactionResponse {
+  string transaction_id = 1;
+}
+
+message CommitTransactionRequest {
+  string transaction_id = 1;
+}
+
+message CommitTransactionResponse {
+  string bookmark = 1;
+}
+
+message RollbackTransactionRequest {
+  string transaction_id = 1;
+}
+
+message RollbackTransactionResponse {}
+
+// -- Schema -----------------------------------------------------------
+
+message CreateIndexRequest {
+  string name = 1;
+  string label = 2;
+  string property = 3;
+  string transaction_id = 4;
+}
+
+message CreateIndexResponse {}
+
+message DropIndexRequest {
+  string name = 1;
+  string transaction_id = 2;
+}
+
+message DropIndexResponse {}
+
+// -- Database info ----------------------------------------------------
+
+message GetLabelsRequest {}
+message GetLabelsResponse {
+  repeated string labels = 1;
+}
+
+message GetRelationshipTypesRequest {}
+message GetRelationshipTypesResponse {
+  repeated string types = 1;
+}
+
+message GetPropertyKeysRequest {}
+message GetPropertyKeysResponse {
+  repeated string keys = 1;
+}
+
+message GetNodeCountRequest {}
+message GetNodeCountResponse {
+  uint64 count = 1;
+}
+
+message GetEdgeCountRequest {}
+message GetEdgeCountResponse {
+  uint64 count = 1;
+}
+
+// -- Batch CRUD ------------------------------------------------------
+
+message BatchCreateNodesRequest {
+  repeated CreateNodeRequest nodes = 1;
+  string transaction_id = 2;
+}
+
+message BatchCreateNodesResponse {
+  repeated uint64 node_ids = 1;
+}
+
+message BatchCreateEdgesRequest {
+  repeated CreateEdgeRequest edges = 1;
+  string transaction_id = 2;
+}
+
+message BatchCreateEdgesResponse {
+  repeated uint64 edge_ids = 1;
+}
+
+// -- Query Channel (bidirectional streaming) -------------------------
+
+message QueryChannelRequest {
+  uint64 request_id = 1;
+  string query = 2;
+  map<string, Value> parameters = 3;
+  string database = 4;
+  string access_mode = 5;
+  int64 timeout_ms = 6;
+}
+
+message QueryChannelResponse {
+  uint64 request_id = 1;
+  oneof payload {
+    QueryHeader header = 2;
+    QueryRow row = 3;
+    QueryFooter footer = 4;
+    QueryError error = 5;
+  }
+}
+
+message QueryError {
+  int32 code = 1;
+  string message = 2;
+}
+
+// -- Service definition -----------------------------------------------
+
+service TraverseService {
+  // Query execution (server-streaming rows)
+  rpc ExecuteQuery(ExecuteQueryRequest) returns (stream ExecuteQueryResponse);
+
+  // Node CRUD
+  rpc CreateNode(CreateNodeRequest) returns (CreateNodeResponse);
+  rpc GetNode(GetNodeRequest) returns (GetNodeResponse);
+  rpc DeleteNode(DeleteNodeRequest) returns (DeleteNodeResponse);
+
+  // Edge CRUD
+  rpc CreateEdge(CreateEdgeRequest) returns (CreateEdgeResponse);
+  rpc GetEdge(GetEdgeRequest) returns (GetEdgeResponse);
+  rpc DeleteEdge(DeleteEdgeRequest) returns (DeleteEdgeResponse);
+
+  // Property updates
+  rpc UpdateProperties(UpdatePropertiesRequest) returns (UpdatePropertiesResponse);
+
+  // Explicit transactions
+  rpc BeginTransaction(BeginTransactionRequest) returns (BeginTransactionResponse);
+  rpc CommitTransaction(CommitTransactionRequest) returns (CommitTransactionResponse);
+  rpc RollbackTransaction(RollbackTransactionRequest) returns (RollbackTransactionResponse);
+
+  // Schema
+  rpc CreateIndex(CreateIndexRequest) returns (CreateIndexResponse);
+  rpc DropIndex(DropIndexRequest) returns (DropIndexResponse);
+
+  // Database info
+  rpc GetLabels(GetLabelsRequest) returns (GetLabelsResponse);
+  rpc GetRelationshipTypes(GetRelationshipTypesRequest) returns (GetRelationshipTypesResponse);
+  rpc GetPropertyKeys(GetPropertyKeysRequest) returns (GetPropertyKeysResponse);
+  rpc GetNodeCount(GetNodeCountRequest) returns (GetNodeCountResponse);
+  rpc GetEdgeCount(GetEdgeCountRequest) returns (GetEdgeCountResponse);
+
+  // Batch CRUD
+  rpc BatchCreateNodes(BatchCreateNodesRequest) returns (BatchCreateNodesResponse);
+  rpc BatchCreateEdges(BatchCreateEdgesRequest) returns (BatchCreateEdgesResponse);
+
+  // Bidirectional query channel - one persistent stream, multiplexed by request_id
+  rpc QueryChannel(stream QueryChannelRequest) returns (stream QueryChannelResponse);
+}

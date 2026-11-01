@@ -1,0 +1,15 @@
+# Threaded WASM requires these target features. Scoped to this crate
+# only - workspace-wide builds aren't affected.
+#
+# `atomics` + `bulk-memory` are what wasm-bindgen-rayon checks for at
+# compile time. `mutable-globals` is needed by recent stdlib changes
+# emitted in threaded WASM.
+[target.wasm32-unknown-unknown]
+rustflags = [
+    "-C", "target-feature=+atomics,+bulk-memory,+mutable-globals",
+]
+
+# `-Z build-std` is required for threaded WASM (rebuilds std with
+# panic_abort instead of unwinding, which WASM doesn't support).
+[unstable]
+build-std = ["panic_abort", "std"]

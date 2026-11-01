@@ -1,0 +1,29 @@
+[package]
+name = "traverse-python"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Python bindings for Traverse embedded graph database"
+
+[lib]
+name = "traverse"
+crate-type = ["cdylib"]
+
+[dependencies]
+traverse-core = { path = "../traverse-core" }
+traverse-cypher = { path = "../traverse-cypher" }
+# ISO/IEC 39075 GQL front-end for execute(dialect="gql").
+traverse-gql = { path = "../traverse-gql" }
+pyo3 = { version = "0.30", features = ["abi3-py310", "extension-module"] }
+# `local_dynamic_tls` builds mimalloc with the local-dynamic TLS model.
+# Without it, loading this extension module (a dlopen'd .so) fails on
+# Linux with "cannot allocate memory in static TLS block" - the default
+# initial-exec model needs a static TLS block that isn't reserved for
+# dynamically-loaded libraries.
+mimalloc = { version = "0.1", features = ["local_dynamic_tls"] }
+
+[lints]
+workspace = true

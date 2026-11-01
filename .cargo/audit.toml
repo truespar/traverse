@@ -1,0 +1,23 @@
+# cargo-audit configuration (https://github.com/rustsec/rustsec/tree/main/cargo-audit)
+#
+# Run: cargo audit
+
+[advisories]
+ignore = [
+    # rkyv 0.7.46 (OOB reads with Rc/Arc). Present in Cargo.lock only as an
+    # optional dependency of rust_decimal's `rkyv` feature, which nothing in
+    # the workspace enables - it is never compiled or linked. We use rkyv 0.8.
+    # Re-check when rust_decimal drops or bumps the optional dep.
+    "RUSTSEC-2026-0235",
+    # bincode 2.0.1 (unmaintained). No Traverse code uses it any more - the
+    # .tvmodel and auth-catalog formats moved to crates/traverse-codec
+    # (postcard payload, framed + CRC-32, with a built-in decoder for the
+    # old bincode payloads). It remains in the lockfile only because
+    # burn-core 0.21 depends on it (the `ml` feature). Re-check on the next
+    # Burn upgrade.
+    "RUSTSEC-2025-0141",
+    # paste 1.0.15 (unmaintained proc-macro). Transitive via burn-ndarray /
+    # cubecl / macerator (the `ml` feature); nothing in the workspace names
+    # it. Re-check on the next Burn upgrade.
+    "RUSTSEC-2024-0436",
+]

@@ -1,0 +1,30 @@
+[package]
+name = "traverse-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Traverse command-line interface"
+
+[dependencies]
+traverse-core = { path = "../traverse-core" }
+traverse-cypher = { path = "../traverse-cypher" }
+traverse-server = { path = "../traverse-server" }
+clap = { workspace = true }
+rustyline = { workspace = true }
+comfy-table = { workspace = true }
+serde_json = { workspace = true }
+csv = { workspace = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util"] }
+tokio-rustls = "0.26"
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+webpki-roots = "1"
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "test-util", "sync"] }
+
+[lints]
+workspace = true

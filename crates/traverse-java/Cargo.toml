@@ -1,0 +1,26 @@
+[package]
+name = "traverse-java"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Java JNI bindings for Traverse embedded graph database"
+
+[lib]
+name = "traverse_java"
+crate-type = ["cdylib"]
+
+[dependencies]
+traverse-core = { path = "../traverse-core" }
+traverse-cypher = { path = "../traverse-cypher" }
+# ISO/IEC 39075 GQL front-end for execute(..., dialect: "gql").
+traverse-gql = { path = "../traverse-gql" }
+jni = "0.22"
+# local-dynamic TLS: with mimalloc's default (initial-exec) loading this library with dlopen fails
+# on Linux with "cannot allocate memory in static TLS block".
+mimalloc = { version = "0.1", features = ["local_dynamic_tls"] }
+
+[lints]
+workspace = true

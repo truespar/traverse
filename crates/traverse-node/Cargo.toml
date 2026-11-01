@@ -1,0 +1,31 @@
+[package]
+name = "traverse-node"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Node.js N-API bindings for Traverse embedded graph database"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+base64 = { workspace = true }
+traverse-core = { path = "../traverse-core" }
+traverse-cypher = { path = "../traverse-cypher" }
+# ISO/IEC 39075 GQL front-end for execute(..., dialect: "gql").
+traverse-gql = { path = "../traverse-gql" }
+napi = { version = "3", features = ["napi6", "serde-json"] }
+napi-derive = "3"
+# local-dynamic TLS: with mimalloc's default (initial-exec) loading this library with dlopen fails
+# on Linux with "cannot allocate memory in static TLS block".
+mimalloc = { version = "0.1", features = ["local_dynamic_tls"] }
+serde_json = "1"
+
+[build-dependencies]
+napi-build = "2"
+
+[lints]
+workspace = true
