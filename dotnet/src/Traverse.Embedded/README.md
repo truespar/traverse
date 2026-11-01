@@ -251,9 +251,11 @@ The NuGet package bundles the native Traverse library under `runtimes/<rid>/nati
 |---|---|
 | `win-x64` | `traverse_ffi.dll` |
 | `linux-x64` | `libtraverse_ffi.so` |
+| `osx-arm64` | `libtraverse_ffi.dylib` |
 
-On other platforms (macOS, ARM64) build it from source with `cargo build --release -p traverse-ffi`
-and set `TRAVERSE_FFI_LIB` to the library file (`libtraverse_ffi.dylib` on macOS). The variable
+On other platforms (Intel macOS, Linux or Windows on ARM64) build it from source with
+`cargo build --release -p traverse-ffi` and set `TRAVERSE_FFI_LIB` to the library file
+(`libtraverse_ffi.dylib` on macOS). The variable
 also overrides the bundled library, for example with a build of your own.
 
 ## Documentation

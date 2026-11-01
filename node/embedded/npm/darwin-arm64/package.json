@@ -1,0 +1,42 @@
+{
+  "name": "@truespar/traverse-node-darwin-arm64",
+  "version": "0.9.0",
+  "cpu": [
+    "arm64"
+  ],
+  "main": "traverse-node.darwin-arm64.node",
+  "files": [
+    "traverse-node.darwin-arm64.node",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+    "THIRD-PARTY-NOTICES"
+  ],
+  "description": "Embedded Traverse graph database for Node.js: the engine in your process, no server",
+  "keywords": [
+    "graph",
+    "database",
+    "cypher",
+    "gql",
+    "embedded",
+    "traverse"
+  ],
+  "homepage": "https://truespar.com/traverse/docs",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/truespar/traverse.git",
+    "directory": "node/embedded/npm/darwin-arm64"
+  },
+  "bugs": {
+    "url": "https://github.com/truespar/traverse/issues"
+  },
+  "license": "MIT OR Apache-2.0",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "os": [
+    "darwin"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -2,7 +2,7 @@
 
 The [Traverse](https://github.com/truespar/traverse) graph database inside your Python process,
 with no server. Open or create a `.tvdb` file, query it with openCypher or ISO/IEC 39075 GQL, and
-load data with the bulk writer. Python 3.10+ on Windows x64 and Linux x64.
+load data with the bulk writer. Python 3.10+ on Windows x64, Linux x64 and macOS on Apple silicon.
 
 The import name is `traverse`. To talk to a Traverse server instead, use
 [traverse-http](https://pypi.org/project/traverse-http/).
