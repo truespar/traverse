@@ -103,6 +103,10 @@ pub struct RecoveryReport {
     pub resume_segment_offset: Option<u64>,
     /// Highest segment_id found; seeds the writer's `next_segment_id`.
     pub highest_segment_id: u64,
+    /// The scan's `min_lsn`: what the snapshot already holds. The writer appends past it even
+    /// when the segments end lower or are missing (a file copied without its log), or recovery
+    /// would skip the new commits.
+    pub floor_lsn: u64,
 }
 
 impl RecoveryReport {
@@ -127,6 +131,7 @@ pub fn scan_segments(dir: &Path, stem: &str, min_lsn: u64) -> Result<RecoveryRep
         resume_segment: None,
         resume_segment_offset: None,
         highest_segment_id: 0,
+        floor_lsn: min_lsn,
     };
 
     if segments.is_empty() {

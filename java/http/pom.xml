@@ -34,8 +34,15 @@
     </developers>
 
     <scm>
-        <url>https://truespar.com/traverse</url>
+        <url>https://github.com/truespar/traverse</url>
+        <connection>scm:git:https://github.com/truespar/traverse.git</connection>
+        <developerConnection>scm:git:https://github.com/truespar/traverse.git</developerConnection>
     </scm>
+
+    <issueManagement>
+        <system>GitHub</system>
+        <url>https://github.com/truespar/traverse/issues</url>
+    </issueManagement>
 
     <properties>
         <maven.compiler.release>25</maven.compiler.release>

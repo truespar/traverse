@@ -35,6 +35,9 @@
     "url": "https://github.com/truespar/traverse.git",
     "directory": "crates/traverse-wasm"
   },
+  "bugs": {
+    "url": "https://github.com/truespar/traverse/issues"
+  },
   "publishConfig": {
     "access": "public"
   },

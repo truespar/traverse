@@ -26,6 +26,12 @@ classifiers = [
     "Topic :: Database :: Database Engines/Servers",
 ]
 
+[project.urls]
+Homepage = "https://truespar.com/traverse/docs"
+Documentation = "https://truespar.com/traverse/docs"
+Source = "https://github.com/truespar/traverse"
+Issues = "https://github.com/truespar/traverse/issues"
+
 [tool.maturin]
 features = ["pyo3/extension-module"]
 manifest-path = "Cargo.toml"

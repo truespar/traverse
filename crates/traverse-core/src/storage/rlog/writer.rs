@@ -13,11 +13,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
-use super::record::{CommitPayload, Op, RecordKind, encode_record};
+use super::record::{CommitPayload, Op, RECORD_ALIGNMENT, RecordKind, encode_record};
 use super::recovery::{RecoveryReport, scan_segments};
 use super::segment::{
     DEFAULT_SEGMENT_SIZE, MIN_SEGMENT_SIZE, SEGMENT_HEADER_SIZE, SegmentHeader, SegmentWriter,
-    discover_segments, segment_path,
+    discover_segments, remove_segments, segment_path,
 };
 
 /// Observability counters. Updated under the caller-side writer mutex, so reads
@@ -389,6 +389,10 @@ impl LogWriter {
     /// offset. Torn bytes past it get overwritten; any leftovers from a previous
     /// incarnation fail the CRC/LSN check on re-read.
     ///
+    /// The writer never assigns an LSN the snapshot already covers
+    /// ([`RecoveryReport::floor_lsn`]): with no segments, or segments that end below it, it
+    /// starts a new segment there.
+    ///
     /// Segment-header failure: refuses to open, since continuing could silently
     /// abandon recoverable transactions.
     pub fn resume(options: WriterOptions, report: &RecoveryReport) -> Result<Self> {
@@ -412,19 +416,28 @@ impl LogWriter {
             )));
         }
 
+        // recovery skips everything at or below what the snapshot holds, so no new record may get
+        // an LSN there
+        let floor = report.floor_lsn.next_multiple_of(RECORD_ALIGNMENT as u64);
+        let fresh_segment = |segment_id: u64| {
+            let path = segment_path(&options.dir, &options.stem, segment_id);
+            let header = SegmentHeader {
+                segment_id,
+                start_lsn: floor,
+                created_ns: now_ns(),
+                salt: random_salt(),
+            };
+            SegmentWriter::create(path, header, options.segment_size)
+        };
         let (active, next_segment_id, next_lsn, last_committed_lsn, next_tx_id) =
             match report.resume_segment.clone() {
-                // no segments yet: create segment 0
-                None => {
-                    let path = segment_path(&options.dir, &options.stem, 0);
-                    let header = SegmentHeader {
-                        segment_id: 0,
-                        start_lsn: 0,
-                        created_ns: now_ns(),
-                        salt: random_salt(),
-                    };
-                    let active = SegmentWriter::create(path, header, options.segment_size)?;
-                    (active, 1, 0, 0, 1)
+                // no segments: segment 0, starting where the snapshot ends
+                None => (fresh_segment(0)?, 1, floor, 0, 1),
+                // the segments end below what the snapshot holds (another copy's log, or one cut
+                // short): a new segment past it; replay already skips the old ones
+                Some(_) if report.resume_lsn < floor => {
+                    let id = report.highest_segment_id + 1;
+                    (fresh_segment(id)?, id + 1, floor, 0, 1)
                 }
                 // resume into the segment holding the last valid COMMIT
                 Some(path) => {
@@ -677,6 +690,22 @@ impl LogWriter {
         }
 
         Ok(deleted)
+    }
+
+    /// Closes the log and deletes all of its segments, the active one included, when the
+    /// database file holds everything in them: `covered_lsn`, the position the file was saved
+    /// at, is at or past [`next_lsn`](Self::next_lsn). A clean close then leaves the `.tvdb`
+    /// alone; the next open starts a new log past the file's position. Returns whether it
+    /// deleted the log (`false`: something logged isn't in the file, so it stays).
+    pub fn retire(self, covered_lsn: u64) -> Result<bool> {
+        if self.next_lsn() > covered_lsn {
+            return Ok(false);
+        }
+        self.sync_now()?;
+        let (dir, stem) = (self.options.dir.clone(), self.options.stem.clone());
+        drop(self); // closes the active segment
+        remove_segments(&discover_segments(&dir, &stem)?)?;
+        Ok(true)
     }
 }
 

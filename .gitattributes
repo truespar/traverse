@@ -1,0 +1,5 @@
+# GitHub's language statistics: the vendored openCypher TCK and generated files aren't Traverse's code
+crates/traverse-cypher/tests/features/** linguist-vendored
+crates/traverse-server/static/** linguist-generated
+node/embedded/index.js linguist-generated
+node/embedded/index.d.ts linguist-generated

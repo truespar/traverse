@@ -16,8 +16,10 @@
     <Copyright>Copyright 2026 The Intelligence Company AB (publ)</Copyright>
     <PackageLicenseExpression>MIT OR Apache-2.0</PackageLicenseExpression>
     <PackageProjectUrl>https://truespar.com/traverse/docs</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/truespar/traverse</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
     <PackageReadmeFile>README.md</PackageReadmeFile>
-    <PackageReleaseNotes>See https://truespar.com/traverse/docs for full release notes.</PackageReleaseNotes>
+    <PackageReleaseNotes>https://github.com/truespar/traverse/blob/main/RELEASE_NOTES.md</PackageReleaseNotes>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)' == 'Release'">

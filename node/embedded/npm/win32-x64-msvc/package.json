@@ -18,6 +18,14 @@
     "traverse"
   ],
   "homepage": "https://truespar.com/traverse/docs",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/truespar/traverse.git",
+    "directory": "node/embedded/npm/win32-x64-msvc"
+  },
+  "bugs": {
+    "url": "https://github.com/truespar/traverse/issues"
+  },
   "license": "MIT OR Apache-2.0",
   "engines": {
     "node": ">=22.0.0"

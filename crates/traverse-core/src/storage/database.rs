@@ -282,6 +282,27 @@ impl Database {
         }
     }
 
+    /// After the final save: when the file holds every logged commit, the redo log goes, so a
+    /// closed database is its `.tvdb` alone. Runs while the file lock is held, so no other
+    /// process can be appending to the log it deletes. Keeps the log when it holds anything the
+    /// file doesn't (a failed save, commits replayed at open and not saved since), or when
+    /// another holder still has the writer (a server that took it with `into_parts`).
+    fn retire_log(&mut self) {
+        let covered = self.saved.position.load(Ordering::Acquire);
+        let Some(writer) = self.mvcc.log_writer.take() else {
+            return;
+        };
+        match Arc::try_unwrap(writer) {
+            Ok(writer) => {
+                let writer = writer.into_inner().unwrap_or_else(PoisonError::into_inner);
+                if let Err(e) = writer.retire(covered) {
+                    tracing::warn!("failed to delete the redo log of a closed database: {e}");
+                }
+            }
+            Err(shared) => self.mvcc.log_writer = Some(shared),
+        }
+    }
+
     /// The live graph (latest state, not a snapshot; see [`begin_read`](Database::begin_read)).
     /// Holds the structural read lock: writes wait until it drops, so don't write on this thread
     /// while holding it.
@@ -988,6 +1009,7 @@ impl Drop for Database {
             if has_changes && let Err(e) = self.flush() {
                 tracing::warn!("failed to flush database on drop: {e}");
             }
+            self.retire_log();
         }
         let lock_path = self.path.with_extension("tvdb.lock");
         #[cfg(feature = "file-locking")]
