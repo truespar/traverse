@@ -4,6 +4,14 @@ All notable changes to Traverse are documented in this file.
 
 ---
 
+## Unreleased
+
+### Embedded bindings
+
+- **macOS on Apple silicon.** The embedded packages carry a native library for `aarch64-apple-darwin`: `@truespar/traverse-node-darwin-arm64` for Node.js, `runtimes/osx-arm64` in the `Traverse.Embedded` NuGet package, the jar for Java, a macOS wheel for Python and `traverse-ffi-<version>-aarch64-macos.tar.gz` on the GitHub release for Go and C. On a Mac with Apple silicon, .NET no longer needs `TRAVERSE_FFI_LIB`, Java no longer needs `TRAVERSE_JAVA_LIB` and Node.js no longer needs `NAPI_RS_NATIVE_LIBRARY_PATH`; Go still loads the library from `TRAVERSE_FFI_LIB`, the executable's directory or the system library path.
+
+---
+
 ## 0.9.0 - 2026-11-01
 
 ### Licensing removed

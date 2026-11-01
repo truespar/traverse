@@ -4,7 +4,7 @@ Two Maven Central artifacts, both for Java 25 or later:
 
 | Artifact | What it is |
 |---|---|
-| `com.truespar:traverse-java` | The database in your process, over JNI; the jar bundles the native library for Windows x64 and Linux x64 |
+| `com.truespar:traverse-java` | The database in your process, over JNI; the jar bundles the native library for Windows x64, Linux x64 and macOS on Apple silicon |
 | `com.truespar:traverse-http` | Client for a Traverse server's HTTP management API (`java/http`) |
 
 ## Embedded
@@ -44,7 +44,7 @@ loads nodes and edges in bulk.
 
 Run with `--enable-native-access=ALL-UNNAMED` (or the module that uses Traverse) so the JVM loads
 the library without a warning. The jar's library is extracted once per version into a per-user
-cache. On other platforms (macOS, ARM64) build it with `cargo build --release -p traverse-java`
+cache. On other platforms (Intel macOS, Linux or Windows on ARM64) build it with `cargo build --release -p traverse-java`
 and set `TRAVERSE_JAVA_LIB` (or the `traverse.library` system property) to the file; that also
 overrides the bundled library.
 
