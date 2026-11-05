@@ -24,16 +24,6 @@ pub(super) fn classify_query(plan: &LogicalPlan, stats: &QueryStats) -> QueryTyp
     }
 }
 
-/// Refines a pre-classified query type with runtime stats (streaming): `Read` with observed
-/// mutations becomes `ReadWrite` (a UDF or procedure that writes).
-pub(super) fn classify_query_from_hint(hint: QueryType, stats: &QueryStats) -> QueryType {
-    if hint == QueryType::Read && !stats.is_empty() {
-        QueryType::ReadWrite
-    } else {
-        hint
-    }
-}
-
 /// Does `pred` hold for any operator of `plan`? Iterative over every child, so no operator hides
 /// what's under it and deep plans can't overflow the stack.
 fn any_operator(plan: &LogicalPlan, pred: impl Fn(&LogicalPlan) -> bool) -> bool {
@@ -48,7 +38,7 @@ fn any_operator(plan: &LogicalPlan, pred: impl Fn(&LogicalPlan) -> bool) -> bool
 }
 
 /// Plan contains schema operations?
-fn plan_is_schema(plan: &LogicalPlan) -> bool {
+pub(crate) fn plan_is_schema(plan: &LogicalPlan) -> bool {
     any_operator(plan, |node| {
         matches!(
             node,
@@ -74,7 +64,7 @@ fn plan_is_schema(plan: &LogicalPlan) -> bool {
 }
 
 /// Does the plan change data or schema: a write clause or DDL anywhere in it, or a procedure that
-/// writes ([`procedure_writes`](crate::operators::call::procedure_writes))?
+/// writes ([`procedure_writes`](crate::procedures::procedure_writes))?
 pub(crate) fn plan_is_mutating(plan: &LogicalPlan) -> bool {
     any_operator(plan, |node| match node {
         LogicalPlan::CreateNode { .. }
@@ -94,7 +84,7 @@ pub(crate) fn plan_is_mutating(plan: &LogicalPlan) -> bool {
         | LogicalPlan::CreateEdgeIndex { .. }
         | LogicalPlan::DropEdgeIndex { .. } => true,
         LogicalPlan::CallProcedure { procedure_name, .. } => {
-            crate::operators::call::procedure_writes(procedure_name)
+            crate::procedures::procedure_writes(procedure_name)
         }
         _ => false,
     })
@@ -102,7 +92,7 @@ pub(crate) fn plan_is_mutating(plan: &LogicalPlan) -> bool {
 
 /// Plan has a projection/aggregation (a RETURN)?
 #[recursive::recursive]
-pub(super) fn plan_has_projection(plan: &LogicalPlan) -> bool {
+pub(crate) fn plan_has_projection(plan: &LogicalPlan) -> bool {
     match plan {
         LogicalPlan::Project { .. }
         | LogicalPlan::Aggregate { .. }
@@ -245,7 +235,7 @@ pub fn plan_columns(plan: &LogicalPlan) -> Vec<String> {
 /// All columns visible at this plan node (for RETURN *), inherited ones included, unlike
 /// `plan_columns` which gives only the node's own output.
 #[recursive::recursive]
-pub(super) fn plan_visible_columns(plan: &LogicalPlan) -> Vec<String> {
+pub(crate) fn plan_visible_columns(plan: &LogicalPlan) -> Vec<String> {
     match plan {
         // Aggregate replaces columns with its outputs
         LogicalPlan::Aggregate { keys, aggs, .. } => {

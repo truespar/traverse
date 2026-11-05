@@ -303,11 +303,14 @@ impl GraphAlgorithm for Node2Vec {
                                 list.push(u.0 as u32);
                             }
                         });
-                        graph.for_each_in(v, &mut |u, _eid, _w| {
-                            if u != v {
-                                list.push(u.0 as u32);
-                            }
-                        });
+                        // an undirected projection lists both directions as out already
+                        if !graph.is_undirected() {
+                            graph.for_each_in(v, &mut |u, _eid, _w| {
+                                if u != v {
+                                    list.push(u.0 as u32);
+                                }
+                            });
+                        }
                     }
                 }
                 list.sort_unstable();

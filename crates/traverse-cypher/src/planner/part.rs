@@ -2,8 +2,8 @@
 //! the label / type / property filters on them.
 
 use crate::ast::{
-    BinOp, CmpOp, Expr, Literal, NodePattern, PatternElement, PatternPart, QuantifierKind,
-    RelDirection,
+    BinOp, CmpOp, Expr, Literal, NodePattern, PathMode, PatternElement, PatternPart,
+    QuantifierKind, RelDirection,
 };
 use crate::error::CypherError;
 
@@ -11,19 +11,44 @@ use super::IndexHints;
 use super::plan::LogicalPlan;
 use super::vars::{collect_expr_variables, is_indexable_value};
 
-/// Plans one pattern part (one node + chain of rels). Returns
-/// `(plan, renames, chain_directly, deferred_predicates)`:
-/// - `renames`: recheck variable -> original bound variable, for equality
-///   filters after the CrossProduct
-/// - `chain_directly`: chain on top of the existing plan (no CrossProduct),
-///   because a BindPathEndpoints uses input variables
-/// - `deferred_predicates`: filters on variables outside this part, applied
-///   after the CrossProduct merge
+/// One planned pattern part.
+pub(super) struct PlannedPart {
+    pub plan: LogicalPlan,
+    /// Recheck variable -> original bound variable, for equality filters once the part joins the
+    /// plan.
+    pub renames: Vec<(String, String)>,
+    /// Chain on top of the existing plan (no CrossProduct): the part starts from a bound node or
+    /// a bound relationship's endpoints.
+    pub chain_directly: bool,
+    /// Filters on variables outside this part, applied once it joins the plan.
+    pub deferred: Vec<Expr>,
+    /// The relationships the part binds, in pattern order (none in a WALK part, which may reuse
+    /// them).
+    pub rels: Vec<PartRel>,
+}
+
+/// A relationship a pattern part binds.
+pub(super) struct PartRel {
+    /// Its variable in the plan (a `__recheck_` alias for one an earlier clause bound).
+    pub var: String,
+    /// A relationship list (variable-length or quantified), not a single relationship.
+    pub list: bool,
+    /// Taken from its endpoints' binding, not expanded: no expand kept it off the relationships
+    /// before it.
+    pub bound: bool,
+}
+
+/// Plans one pattern part (one node + chain of rels). `outer_rels` are the relationships the
+/// clause's earlier parts bound: a part that chains onto them keeps every expand off them, so
+/// one MATCH never binds a relationship twice.
 pub(super) fn plan_single_pattern_part(
     part: &PatternPart,
     bound_vars: &std::collections::HashSet<String>,
     hints: &IndexHints,
-) -> Result<(LogicalPlan, Vec<(String, String)>, bool, Vec<Expr>), CypherError> {
+    outer_rels: &[String],
+) -> Result<PlannedPart, CypherError> {
+    // WALK parts (`REPEATABLE ELEMENTS`) may reuse relationships
+    let unique = part.path_mode != PathMode::Walk;
     let mut renames: Vec<(String, String)> = Vec::new();
     let elem = &part.element;
     let node = &elem.node;
@@ -49,18 +74,26 @@ pub(super) fn plan_single_pattern_part(
                 .unwrap_or_else(|| format!("__anon_{}", rand_id()));
             let plan = LogicalPlan::BindPathEndpoints {
                 input: Box::new(LogicalPlan::EmptyRow),
-                rel_var: rv,
+                rel_var: rv.clone(),
                 from_var,
                 to_var,
                 direction: rel.direction.clone(),
             };
             let plan = wrap_qpp_list_groups(plan, part);
-            return Ok((
+            return Ok(PlannedPart {
                 plan,
                 renames,
-                true,
-                collect_pattern_where_preds(&part.element),
-            ));
+                chain_directly: true,
+                deferred: collect_pattern_where_preds(&part.element),
+                rels: unique
+                    .then_some(PartRel {
+                        var: rv,
+                        list: true,
+                        bound: true,
+                    })
+                    .into_iter()
+                    .collect(),
+            });
         }
 
         // first chain is a pre-bound fixed-length edge: endpoints from the edge, no scan (else
@@ -83,7 +116,7 @@ pub(super) fn plan_single_pattern_part(
                 .unwrap_or_else(|| format!("__anon_{}", rand_id()));
             let mut plan: LogicalPlan = LogicalPlan::BindEdgeEndpoints {
                 input: Box::new(LogicalPlan::EmptyRow),
-                edge_var,
+                edge_var: edge_var.clone(),
                 from_var: from_name.clone(),
                 to_var: to_name.clone(),
                 direction: rel.direction.clone(),
@@ -157,23 +190,46 @@ pub(super) fn plan_single_pattern_part(
             }
             let plan = wrap_qpp_list_groups(plan, part);
             deferred_after.extend(collect_pattern_where_preds(&part.element));
-            return Ok((plan, renames, true, deferred_after));
+            return Ok(PlannedPart {
+                plan,
+                renames,
+                chain_directly: true,
+                deferred: deferred_after,
+                rels: unique
+                    .then_some(PartRel {
+                        var: edge_var,
+                        list: false,
+                        bound: true,
+                    })
+                    .into_iter()
+                    .collect(),
+            });
         }
     }
 
-    // first node bound and the pattern expands: skip the scan and expand from the binding (no
-    // CrossProduct + label scan + equality filter)
-    let first_node_bound = !elem.chain.is_empty()
-        && node
-            .variable
-            .as_ref()
-            .is_some_and(|v| bound_vars.contains(v));
+    // first node bound: skip the scan and expand from the binding (no CrossProduct + label scan +
+    // equality filter); a lone bound node only checks the binding is a node
+    let first_node_bound = node
+        .variable
+        .as_ref()
+        .is_some_and(|v| bound_vars.contains(v));
 
     let mut deferred_predicates: Vec<Expr> = Vec::new();
 
     let (var, mut plan) = if first_node_bound {
         let var = node.variable.as_ref().unwrap().clone();
         let mut plan = LogicalPlan::EmptyRow;
+        if elem.chain.is_empty() {
+            plan = LogicalPlan::Filter {
+                input: Box::new(plan),
+                predicate: Expr::IsTyped {
+                    expr: Box::new(Expr::Variable(var.clone())),
+                    type_name: "NODE".to_string(),
+                    negated: false,
+                    not_null: true,
+                },
+            };
+        }
         // check labels on the bound node
         for lbl in &node.labels {
             plan = LogicalPlan::Filter {
@@ -202,18 +258,11 @@ pub(super) fn plan_single_pattern_part(
         }
         (var, plan)
     } else {
-        // scan the first node; rename if already bound (no chains)
-        let var = if let Some(ref v) = node.variable {
-            if bound_vars.contains(v) {
-                let renamed = format!("__recheck_{v}_{}", rand_id());
-                renames.push((renamed.clone(), v.clone()));
-                renamed
-            } else {
-                v.clone()
-            }
-        } else {
-            format!("__anon_{}", rand_id())
-        };
+        // scan the first node (unbound: a bound one takes the branch above)
+        let var = node
+            .variable
+            .clone()
+            .unwrap_or_else(|| format!("__anon_{}", rand_id()));
         let label = node.labels.first().cloned();
 
         // IndexScan when the node has a label and inline properties matching an index hint
@@ -337,7 +386,15 @@ pub(super) fn plan_single_pattern_part(
     }
 
     let mut current_from = var;
-    let mut prior_edge_vars_acc: Vec<String> = Vec::new();
+    // what each expand keeps off: the part's earlier relationships and, chaining onto the
+    // plan, the clause's earlier parts' (a cross-joined part gets filters instead, see
+    // `plan_match_pattern_with_hints`)
+    let mut prior_edge_vars_acc: Vec<String> = if unique && first_node_bound {
+        outer_rels.to_vec()
+    } else {
+        Vec::new()
+    };
+    let mut rels: Vec<PartRel> = Vec::new();
     for chain in &elem.chain {
         let rel = &chain.rel;
         let target = &chain.node;
@@ -363,7 +420,14 @@ pub(super) fn plan_single_pattern_part(
                 to_var: to_var.clone(),
                 direction: rel.direction.clone(),
             };
-            prior_edge_vars_acc.push(rv.clone());
+            if unique {
+                prior_edge_vars_acc.push(rv.clone());
+                rels.push(PartRel {
+                    var: rv.clone(),
+                    list: true,
+                    bound: true,
+                });
+            }
             edge_vars.push(rv);
             if let Some(ref v) = target.variable {
                 seen_node_vars.insert(v.clone());
@@ -505,7 +569,14 @@ pub(super) fn plan_single_pattern_part(
             }
         }
 
-        prior_edge_vars_acc.push(rel_var.clone());
+        if unique {
+            prior_edge_vars_acc.push(rel_var.clone());
+            rels.push(PartRel {
+                var: rel_var.clone(),
+                list: rel.range.is_some(),
+                bound: false,
+            });
+        }
 
         // relationship inline properties (e.g. [r:KNOWS {name: 'x'}])
         if let Some(ref props) = rel.properties {
@@ -605,7 +676,13 @@ pub(super) fn plan_single_pattern_part(
 
     let plan = wrap_qpp_list_groups(plan, part);
     deferred_predicates.extend(collect_pattern_where_preds(&part.element));
-    Ok((plan, renames, first_node_bound, deferred_predicates))
+    Ok(PlannedPart {
+        plan,
+        renames,
+        chain_directly: first_node_bound,
+        deferred: deferred_predicates,
+        rels,
+    })
 }
 
 /// Pattern-internal `WHERE` predicates of a part (`(n WHERE ...)` / `[r WHERE ...]`,

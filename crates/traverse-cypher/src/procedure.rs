@@ -69,7 +69,7 @@ pub fn get_procedure(name: &str) -> Option<Procedure> {
 /// Output columns of the built-in, runtime-dispatched schema procedures (Neo4j-compatible), which
 /// aren't in the data-driven registry; `None` for other names. They back `CALL db.labels()` /
 /// `db.propertyKeys()` / `db.relationshipTypes()` ..., dispatched in
-/// `operators::bind::CallProcedureOp`, validated as runtime-dispatched in `validate`,
+/// `vex::ops::call::CallProcedureOp`, validated as runtime-dispatched in `validate`,
 /// slot-allocated in `frame`.
 pub(crate) fn builtin_schema_proc_columns(name: &str) -> Option<&'static [&'static str]> {
     match name {

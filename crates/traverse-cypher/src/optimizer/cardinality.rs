@@ -301,9 +301,6 @@ pub fn estimate_cardinality(plan: &LogicalPlan, graph: &dyn GraphView) -> f64 {
         // FOREACH keeps the input cardinality (body output discarded)
         LogicalPlan::ForEach { input, .. } => estimate_cardinality(input, graph),
 
-        // runtime-only leaf: one row per seed frame
-        LogicalPlan::SeededRows(frames) => frames.len().max(1) as f64,
-
         LogicalPlan::CreateIndex { .. }
         | LogicalPlan::CreateVectorIndex { .. }
         | LogicalPlan::CreateFulltextIndex { .. }

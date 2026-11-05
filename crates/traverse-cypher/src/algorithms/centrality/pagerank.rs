@@ -20,18 +20,21 @@
 //! `new_score[v]` per out-edge) needs a single thread or atomic float adds;
 //! pull is the usual parallel form (GAP benchmark, Ligra, Gunrock).
 //!
+//! Each step first computes every node's share, `pr(u) / out_degree(u)`, so a
+//! relationship costs one load and one add; on a GDS projection the pull reads
+//! the snapshot's CSR directly ([`AlgorithmGraph::in_adjacency`]).
+//!
 //! Stops when the L1 distance between old and new scores drops below
-//! `tolerance`, or after `maxIterations`.
+//! `tolerance` (in GDS mode: when every score changes by less), or after
+//! `maxIterations`.
 //!
 //! # Complexity
 //!
-//! O(maxIterations * m + N), m = projected edges. Memory: two `f64` per node.
+//! O(maxIterations * m + N), m = projected edges. Memory: four `f64` per node.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use rayon::prelude::*;
-use traverse_core::graph::types::NodeId;
 
 use crate::types::CypherValue;
 
@@ -47,8 +50,6 @@ use super::super::{
 const DEFAULT_DAMPING: f64 = 0.85;
 const DEFAULT_MAX_ITERATIONS: i64 = 20;
 const DEFAULT_TOLERANCE: f64 = 1e-7;
-/// Cancellation poll interval (nodes) within one iteration's parallel sweep.
-const CANCEL_CHECK_PERIOD: usize = 65_536;
 
 /// PageRank by power iteration (`traverse.pageRank.*`). Stateless.
 pub struct PageRank;
@@ -59,7 +60,8 @@ pub struct PageRankConfig {
     pub damping: f64,
     /// Max power-iteration steps (`maxIterations`, default 20).
     pub max_iterations: i64,
-    /// Stops once the L1 change per step is below this (`tolerance`, default 1e-7).
+    /// Stops once the L1 change per step is below this (`tolerance`, default 1e-7); in GDS mode,
+    /// once every node's change is.
     pub tolerance: f64,
     /// GDS-compatible iteration: per-node teleport `(1-d)` (not `(1-d)/N`) and NO dangling-mass
     /// redistribution (sink mass evaporates), as in Neo4j GDS. Scores then match GDS exactly,
@@ -142,7 +144,8 @@ impl GraphAlgorithm for PageRank {
             return Ok(NodeScalarResult::new("score", vec![f64::NAN; cap]));
         }
 
-        // score buffers sized `cap`, indexed by NodeId even when the projection skips ids
+        // per-node buffers sized `cap`, indexed by NodeId even when the projection skips ids;
+        // inactive slots stay 0 in every one
         let inv_n = 1.0 / n_active as f64;
         // GDS's Pregel initializes every node at alpha = 1 - dampingFactor; when maxIterations
         // stops before convergence (common at the default 20) the initial value still shows in the
@@ -153,124 +156,99 @@ impl GraphAlgorithm for PageRank {
             inv_n
         };
         let mut scores: Vec<f64> = vec![0.0; cap];
-        for &n in &nodes {
-            scores[n.0 as usize] = init;
-        }
         let mut new_scores: Vec<f64> = vec![0.0; cap];
-
-        // out-degrees once, as f64 (no int->float in the inner loop)
+        // what each node passes along each out-relationship, score / out-degree (0 for a sink):
+        // one division per node and step, none per relationship
+        let mut share: Vec<f64> = vec![0.0; cap];
         let mut out_deg: Vec<f64> = vec![0.0; cap];
+        let mut active: Vec<bool> = vec![false; cap];
         for &n in &nodes {
-            out_deg[n.0 as usize] = graph.out_degree(n) as f64;
+            let i = n.0 as usize;
+            scores[i] = init;
+            out_deg[i] = graph.out_degree(n) as f64;
+            active[i] = true;
         }
 
         let d = cfg.damping;
+        let gds = cfg.gds_mode;
         // GDS: per-node teleport (1-d); classic: (1-d)/N
-        let one_minus_d_over_n = if cfg.gds_mode {
-            1.0 - d
-        } else {
-            (1.0 - d) * inv_n
-        };
-
-        // active-row mask, built once so par_chunks_mut skips inactive slots in O(1)
-        let mut active_mask_for_iter: Vec<bool> = vec![false; cap];
-        for &n in &nodes {
-            active_mask_for_iter[n.0 as usize] = true;
-        }
-
+        let teleport = if gds { 1.0 - d } else { (1.0 - d) * inv_n };
         // GDS's Pregel counts the INITIALIZATION superstep toward maxIterations: `maxIterations:
         // 20` means 19 aggregation updates. With that, results match GDS's output exactly
-        let update_steps = if cfg.gds_mode {
+        let update_steps = if gds {
             (cfg.max_iterations - 1).max(0)
         } else {
             cfg.max_iterations
         };
-        for _iter in 0..update_steps {
-            cancel.check()?;
+        let chunk = super::node_chunk(cap);
+        let in_neighbors = super::InNeighbors::new(graph, cap);
 
-            // dangling mass: scores of out_degree == 0 nodes (recomputed each step)
-            let dangling: f64 = nodes
-                .par_iter()
-                .map(|&n| {
-                    let idx = n.0 as usize;
-                    if out_deg[idx] == 0.0 {
-                        scores[idx]
-                    } else {
-                        0.0
-                    }
-                })
-                .sum();
-            // GDS never redistributes dangling mass; it evaporates
-            let dangling_base = if cfg.gds_mode {
-                0.0
-            } else {
-                d * dangling * inv_n
-            };
+        // the steps run on a pool worker: each pass below then starts there, instead of the calling
+        // thread handing it to the pool and waiting, twice per step
+        rayon::scope(|_| -> Result<(), AlgorithmError> {
+            for _ in 0..update_steps {
+                cancel.check()?;
 
-            // pull contributions for all active nodes in parallel; each node writes only its own
-            // `new_scores` slot
-
-            // per-node pull. The slice fast path skips the dyn-FnMut closure without filters
-            // (pagerank's hot loop); writes go straight into new_scores via par_chunks_mut, no
-            // intermediate Vec or serial copy-back
-            let scores_ref: &[f64] = &scores;
-            let out_deg_ref: &[f64] = &out_deg;
-            let active_mask_ref: &[bool] = &active_mask_for_iter;
-            new_scores
-                .par_chunks_mut(1)
-                .enumerate()
-                .for_each(|(idx, slot)| {
-                    if !active_mask_ref[idx] {
-                        slot[0] = 0.0;
-                        return;
-                    }
-                    if idx % CANCEL_CHECK_PERIOD == 0 {
-                        let _ = cancel.check();
-                    }
-                    let v = NodeId(idx as u64);
-                    let mut acc = 0.0;
-                    if let Some(slice) = graph.incoming_adj_slice(v) {
-                        for ep in slice {
-                            let ui = ep.neighbor().0 as usize;
-                            let od = out_deg_ref[ui];
-                            if od > 0.0 {
-                                acc += scores_ref[ui] / od;
-                            }
+                // shares, and the dangling mass (the sinks' scores) on the way
+                let dangling: f64 = share
+                    .par_chunks_mut(chunk)
+                    .zip(scores.par_chunks(chunk))
+                    .zip(out_deg.par_chunks(chunk))
+                    .map(|((share, scores), out_deg)| {
+                        let mut sinks = 0.0;
+                        // selects, not branches: the loop vectorizes
+                        for ((s, &x), &od) in share.iter_mut().zip(scores).zip(out_deg) {
+                            let sink = od == 0.0;
+                            *s = if sink { 0.0 } else { x / od };
+                            sinks += if sink { x } else { 0.0 };
                         }
-                    } else {
-                        graph.for_each_in(v, &mut |u, _eid, _w| {
-                            let od = out_deg_ref[u.0 as usize];
-                            if od > 0.0 {
-                                acc += scores_ref[u.0 as usize] / od;
+                        sinks
+                    })
+                    .sum();
+                // GDS never redistributes dangling mass; it evaporates
+                let dangling_base = if gds { 0.0 } else { d * dangling * inv_n };
+
+                // pull: each node sums its in-neighbors' shares into its own slot (no atomics),
+                // and the chunk's largest and total change come back with it
+                let (scores_ref, share_ref, active_ref, in_neighbors) =
+                    (&scores, &share, &active, &in_neighbors);
+                let (max_change, total_change) = new_scores
+                    .par_chunks_mut(chunk)
+                    .enumerate()
+                    .map(|(c, slots)| {
+                        let first = c * chunk;
+                        let (mut max, mut total) = (0.0f64, 0.0f64);
+                        let range = first..first + slots.len();
+                        in_neighbors.sums(share_ref, active_ref, range, |i, acc| {
+                            let s = teleport + d * acc + dangling_base;
+                            let change = (s - scores_ref[i]).abs();
+                            total += change;
+                            if change > max {
+                                max = change;
                             }
+                            slots[i - first] = s;
                         });
-                    }
-                    slot[0] = one_minus_d_over_n + d * acc + dangling_base;
-                });
+                        (max, total)
+                    })
+                    .reduce(|| (0.0, 0.0), |a, b| (a.0.max(b.0), a.1 + b.1));
+                // GDS stops once every score changes by less than the tolerance, the classic
+                // iteration once the L1 distance drops below it
+                let delta = if gds { max_change } else { total_change };
 
-            // convergence: L1 distance between old and new scores over active nodes
-            let delta: f64 = nodes
-                .par_iter()
-                .map(|&n| (new_scores[n.0 as usize] - scores[n.0 as usize]).abs())
-                .sum();
+                std::mem::swap(&mut scores, &mut new_scores);
 
-            std::mem::swap(&mut scores, &mut new_scores);
-
-            if delta < cfg.tolerance {
-                break;
+                if delta < cfg.tolerance {
+                    break;
+                }
             }
-        }
+            Ok(())
+        })?;
 
         // inactive slots -> NaN so the stream skips them (NodeScalarResult drops NaN rows)
         let mut out = vec![f64::NAN; cap];
         for &n in &nodes {
             out[n.0 as usize] = scores[n.0 as usize];
         }
-
-        // keeps the AtomicU64 import in use
-        let _ = AtomicU64::new(0);
-        let _ = Ordering::Relaxed;
-
         Ok(NodeScalarResult::new("score", out))
     }
 }

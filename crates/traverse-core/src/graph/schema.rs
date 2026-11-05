@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 
 use crate::error::{Error, Result};
 
@@ -13,6 +13,7 @@ use super::constraint::{
 };
 use super::property::{IndexKey, InternedPropertyMap, PropertyMap, PropertyValue};
 use super::stats::GraphStatistics;
+use super::table::IdSet;
 use super::types::{EdgeId, EdgeTypeId, LabelId, NodeId, PropertyKeyId};
 
 impl Graph {
@@ -105,7 +106,7 @@ impl Graph {
                     if i >= SAMPLE_LIMIT {
                         break;
                     }
-                    if let Some(node) = self.nodes.get(nid) {
+                    if let Some(node) = self.nodes.get(&nid) {
                         for (kid, val) in node.properties.iter() {
                             props.entry(kid).or_insert_with(|| val.type_name());
                         }
@@ -134,7 +135,7 @@ impl Graph {
                         break;
                     }
                     // only full edges have properties
-                    if let Some(edge) = self.edges.get(eid) {
+                    if let Some(edge) = self.edges.get(&eid) {
                         for (kid, val) in edge.properties.iter() {
                             props.entry(kid).or_insert_with(|| val.type_name());
                         }
@@ -202,7 +203,7 @@ impl Graph {
         let node_ids: Vec<NodeId> = self
             .label_index
             .get(&LabelId(lid))
-            .map(|s| s.iter().copied().collect())
+            .map(|s| s.to_vec())
             .unwrap_or_default();
         let is_unique = matches!(ctype, ConstraintType::Unique);
 
@@ -335,7 +336,7 @@ impl Graph {
         let edge_ids: Vec<EdgeId> = self
             .edge_type_index
             .get(&EdgeTypeId(tid))
-            .map(|s| s.iter().copied().collect())
+            .map(|s| s.to_vec())
             .unwrap_or_default();
 
         match ctype {
@@ -473,7 +474,7 @@ impl Graph {
             let edge_ids: Vec<EdgeId> = self
                 .edge_type_index
                 .get(&EdgeTypeId(lid))
-                .map(|s| s.iter().copied().collect())
+                .map(|s| s.to_vec())
                 .unwrap_or_default();
             edge_ids
                 .iter()
@@ -487,7 +488,7 @@ impl Graph {
             let node_ids: Vec<NodeId> = self
                 .label_index
                 .get(&LabelId(lid))
-                .map(|s| s.iter().copied().collect())
+                .map(|s| s.to_vec())
                 .unwrap_or_default();
             node_ids
                 .iter()
@@ -573,7 +574,7 @@ impl Graph {
     }
 
     /// Returns edge type names with their edge ID sets.
-    pub fn edge_type_entries(&self) -> Vec<(String, &FxHashSet<EdgeId>)> {
+    pub fn edge_type_entries(&self) -> Vec<(String, &IdSet<EdgeId>)> {
         self.edge_type_index
             .iter()
             .filter_map(|(tid, set)| {

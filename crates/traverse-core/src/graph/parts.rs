@@ -13,6 +13,7 @@ use super::edge::Edge;
 use super::index::{EdgeIndexRegistry, IndexRegistry};
 use super::node::Node;
 use super::stats::GraphStatistics;
+use super::table::{IdSet, IdTable};
 use super::types::{EdgeId, EdgeTypeId, LabelId, NodeId, PropertyKeyId};
 use super::{
     ADJ_ENTRY_COST, EDGE_BASE_COST, Graph, IdCounters, LABEL_INDEX_COST, LoadedEdge,
@@ -155,27 +156,55 @@ impl Graph {
             .chain(
                 self.propless
                     .iter()
-                    .map(|(id, pt)| Edge::new(*id, pt.edge_type, pt.source, pt.target)),
+                    .map(|(id, pt)| Edge::new(id, pt.edge_type, pt.source, pt.target)),
             )
             .collect();
         GraphParts::assemble(self.catalog_parts(), nodes, edges)
     }
 
-    /// Calls `node` on every node and `edge` on every relationship, in storage order, without
-    /// copying the graph. The caller keeps writers out while it runs.
-    pub(crate) fn for_each_record(
+    /// Every node, then every relationship, in storage order and up to `batch` at a time, without
+    /// copying the graph (property-less relationships are built per batch). The caller keeps
+    /// writers out while it runs.
+    pub(crate) fn for_each_record_batch(
         &self,
-        node: &mut dyn FnMut(&Node) -> crate::error::Result<()>,
-        edge: &mut dyn FnMut(&Edge) -> crate::error::Result<()>,
+        batch: usize,
+        nodes: &mut dyn FnMut(&[&Node]) -> crate::error::Result<()>,
+        edges: &mut dyn FnMut(&[&Edge]) -> crate::error::Result<()>,
     ) -> crate::error::Result<()> {
+        let mut nb: Vec<&Node> = Vec::with_capacity(batch);
         for n in self.nodes.values() {
-            node(n)?;
+            nb.push(n);
+            if nb.len() == batch {
+                nodes(&nb)?;
+                nb.clear();
+            }
         }
+        if !nb.is_empty() {
+            nodes(&nb)?;
+        }
+        let mut eb: Vec<&Edge> = Vec::with_capacity(batch);
         for e in self.edges.values() {
-            edge(e)?;
+            eb.push(e);
+            if eb.len() == batch {
+                edges(&eb)?;
+                eb.clear();
+            }
         }
+        if !eb.is_empty() {
+            edges(&eb)?;
+        }
+        let mut owned: Vec<Edge> = Vec::with_capacity(batch);
         for (id, pt) in &self.propless {
-            edge(&Edge::new(*id, pt.edge_type, pt.source, pt.target))?;
+            owned.push(Edge::new(id, pt.edge_type, pt.source, pt.target));
+            if owned.len() == batch {
+                let refs: Vec<&Edge> = owned.iter().collect();
+                edges(&refs)?;
+                owned.clear();
+            }
+        }
+        if !owned.is_empty() {
+            let refs: Vec<&Edge> = owned.iter().collect();
+            edges(&refs)?;
         }
         Ok(())
     }
@@ -199,14 +228,15 @@ impl Graph {
 
         // build node and edge structures in parallel
         type NodeResult = (
-            FxHashMap<NodeId, Node>,
-            FxHashMap<LabelId, FxHashSet<NodeId>>,
+            IdTable<NodeId, Node>,
+            FxHashMap<LabelId, IdSet<NodeId>>,
             FxHashSet<PropertyKeyId>,
+            usize,
         );
         type EdgeResult = (
-            FxHashMap<EdgeId, Edge>,
-            FxHashMap<EdgeId, ProplessEdge>,
-            FxHashMap<EdgeTypeId, FxHashSet<EdgeId>>,
+            IdTable<EdgeId, Edge>,
+            IdTable<EdgeId, ProplessEdge>,
+            FxHashMap<EdgeTypeId, IdSet<EdgeId>>,
             FxHashSet<PropertyKeyId>,
         );
 
@@ -241,21 +271,25 @@ impl Graph {
 
         let (node_result, edge_result): (NodeResult, EdgeResult) = rayon::join(
             || {
-                let mut nodes_map =
-                    FxHashMap::with_capacity_and_hasher(node_count, Default::default());
-                let mut label_index: FxHashMap<LabelId, FxHashSet<NodeId>> = FxHashMap::default();
+                let mut nodes_map = IdTable::with_capacity(node_count);
+                let mut label_index: FxHashMap<LabelId, IdSet<NodeId>> = FxHashMap::default();
                 let mut prop_keys = FxHashSet::default();
+                let mut unlabeled = 0;
                 for node in nodes_vec {
                     let nid = node.id;
+                    unlabeled += usize::from(node.labels.is_empty());
                     for &lid in &node.labels {
-                        label_index.entry(lid).or_default().insert(nid);
+                        label_index
+                            .entry(lid)
+                            .or_insert_with(|| IdSet::with_capacity(node_count))
+                            .insert(nid);
                     }
                     for kid in node.properties.keys() {
                         prop_keys.insert(kid);
                     }
                     nodes_map.insert(nid, node);
                 }
-                (nodes_map, label_index, prop_keys)
+                (nodes_map, label_index, prop_keys, unlabeled)
             },
             || {
                 // pre-count propless vs propped edges to size both maps exactly
@@ -267,18 +301,16 @@ impl Graph {
                 }
                 let n_propped = edge_count - n_propless;
 
-                let mut edges_map =
-                    FxHashMap::with_capacity_and_hasher(n_propped, Default::default());
-                let mut propless_map =
-                    FxHashMap::with_capacity_and_hasher(n_propless, Default::default());
-                let mut edge_type_index: FxHashMap<EdgeTypeId, FxHashSet<EdgeId>> =
+                let mut edges_map = IdTable::with_capacity(n_propped);
+                let mut propless_map = IdTable::with_capacity(n_propless);
+                let mut edge_type_index: FxHashMap<EdgeTypeId, IdSet<EdgeId>> =
                     FxHashMap::default();
                 let mut prop_keys = FxHashSet::default();
                 for edge in edges_vec {
                     let eid = edge.id;
                     edge_type_index
                         .entry(edge.edge_type)
-                        .or_default()
+                        .or_insert_with(|| IdSet::with_capacity(edge_count))
                         .insert(eid);
                     if edge.properties.is_empty() {
                         propless_map.insert(
@@ -300,7 +332,7 @@ impl Graph {
             },
         );
 
-        let (nodes_map, label_index, node_prop_keys) = node_result;
+        let (nodes_map, label_index, node_prop_keys, unlabeled) = node_result;
         let (edges_map, propless_map, edge_type_index, edge_prop_keys) = edge_result;
 
         // Merge property keys from both loops
@@ -331,6 +363,10 @@ impl Graph {
             deleted_edges: FxHashSet::default(),
             strings_dirty: false,
             estimated_memory: 0,
+            columns: super::columns::ColumnSet::new(),
+            loops: 0,
+            unlabeled,
+            bulk: false,
             known_prop_keys,
             node_delta_heads: FxHashMap::default(),
             edge_delta_heads: FxHashMap::default(),
@@ -398,6 +434,16 @@ impl Graph {
 
         // Clear dirty flags produced by create_index
         graph.strings_dirty = false;
+        graph.loops = graph
+            .edges
+            .values()
+            .filter(|e| e.source == e.target)
+            .count()
+            + graph
+                .propless
+                .values()
+                .filter(|e| e.source == e.target)
+                .count();
 
         // Compute initial estimated_memory from loaded data
         {
@@ -506,34 +552,39 @@ impl Graph {
 
         // node/edge ownership maps consume results in place, no extra Vec<Node>/Vec<Edge>
         type NodeResult = (
-            FxHashMap<NodeId, Node>,
-            FxHashMap<LabelId, FxHashSet<NodeId>>,
+            IdTable<NodeId, Node>,
+            FxHashMap<LabelId, IdSet<NodeId>>,
             FxHashSet<PropertyKeyId>,
+            usize,
         );
         type EdgeResult = (
-            FxHashMap<EdgeId, Edge>,
-            FxHashMap<EdgeId, ProplessEdge>,
-            FxHashMap<EdgeTypeId, FxHashSet<EdgeId>>,
+            IdTable<EdgeId, Edge>,
+            IdTable<EdgeId, ProplessEdge>,
+            FxHashMap<EdgeTypeId, IdSet<EdgeId>>,
             FxHashSet<PropertyKeyId>,
         );
 
         let (node_result, edge_result): (NodeResult, EdgeResult) = rayon::join(
             || {
-                let mut nodes_map =
-                    FxHashMap::with_capacity_and_hasher(node_count, Default::default());
-                let mut label_index: FxHashMap<LabelId, FxHashSet<NodeId>> = FxHashMap::default();
+                let mut nodes_map = IdTable::with_capacity(node_count);
+                let mut label_index: FxHashMap<LabelId, IdSet<NodeId>> = FxHashMap::default();
                 let mut prop_keys = FxHashSet::default();
+                let mut unlabeled = 0;
                 for (node, _, _) in node_results {
                     let nid = node.id;
+                    unlabeled += usize::from(node.labels.is_empty());
                     for &lid in &node.labels {
-                        label_index.entry(lid).or_default().insert(nid);
+                        label_index
+                            .entry(lid)
+                            .or_insert_with(|| IdSet::with_capacity(node_count))
+                            .insert(nid);
                     }
                     for kid in node.properties.keys() {
                         prop_keys.insert(kid);
                     }
                     nodes_map.insert(nid, node);
                 }
-                (nodes_map, label_index, prop_keys)
+                (nodes_map, label_index, prop_keys, unlabeled)
             },
             || {
                 let mut n_propless = 0usize;
@@ -544,18 +595,16 @@ impl Graph {
                 }
                 let n_propped = edge_count - n_propless;
 
-                let mut edges_map =
-                    FxHashMap::with_capacity_and_hasher(n_propped, Default::default());
-                let mut propless_map =
-                    FxHashMap::with_capacity_and_hasher(n_propless, Default::default());
-                let mut edge_type_index: FxHashMap<EdgeTypeId, FxHashSet<EdgeId>> =
+                let mut edges_map = IdTable::with_capacity(n_propped);
+                let mut propless_map = IdTable::with_capacity(n_propless);
+                let mut edge_type_index: FxHashMap<EdgeTypeId, IdSet<EdgeId>> =
                     FxHashMap::default();
                 let mut prop_keys = FxHashSet::default();
                 for (loaded_edge, _, _) in edge_results {
                     let eid = loaded_edge.id();
                     edge_type_index
                         .entry(loaded_edge.edge_type())
-                        .or_default()
+                        .or_insert_with(|| IdSet::with_capacity(edge_count))
                         .insert(eid);
                     match loaded_edge {
                         LoadedEdge::Propless {
@@ -585,7 +634,7 @@ impl Graph {
             },
         );
 
-        let (nodes_map, label_index, node_prop_keys) = node_result;
+        let (nodes_map, label_index, node_prop_keys, unlabeled) = node_result;
         let (edges_map, propless_map, edge_type_index, edge_prop_keys) = edge_result;
 
         let mut known_prop_keys = node_prop_keys;
@@ -615,6 +664,10 @@ impl Graph {
             deleted_edges: FxHashSet::default(),
             strings_dirty: false,
             estimated_memory: 0,
+            columns: super::columns::ColumnSet::new(),
+            loops: 0,
+            unlabeled,
+            bulk: false,
             known_prop_keys,
             node_delta_heads: FxHashMap::default(),
             edge_delta_heads: FxHashMap::default(),
@@ -667,6 +720,16 @@ impl Graph {
         graph.install_vector_index_definitions(&vector_index_definitions);
 
         graph.strings_dirty = false;
+        graph.loops = graph
+            .edges
+            .values()
+            .filter(|e| e.source == e.target)
+            .count()
+            + graph
+                .propless
+                .values()
+                .filter(|e| e.source == e.target)
+                .count();
 
         {
             let mut mem: usize = 0;

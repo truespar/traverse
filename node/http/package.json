@@ -1,6 +1,6 @@
 {
   "name": "@truespar/traverse-http",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "license": "MIT OR Apache-2.0",
   "description": "Node.js HTTP client for the Traverse graph database server API",
   "homepage": "https://truespar.com/traverse/docs",

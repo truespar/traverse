@@ -27,7 +27,7 @@ use crate::types::CypherValue;
 
 use super::super::cancellation::CancellationToken;
 use super::super::config::{opt_float, parse_integer};
-use super::super::projection::AlgorithmGraph;
+use super::super::projection::{AlgorithmGraph, DenseAdjacency};
 use super::super::result::{PathRecord, PathResult};
 use super::super::{
     AlgorithmError, AlgorithmMetadata, Category, ConfigParam, ConfigParamType, GraphAlgorithm,
@@ -44,6 +44,9 @@ pub struct DeltaSteppingConfig {
     pub source: NodeId,
     /// If set, only the path to this node is returned (`targetNodeId`).
     pub target: Option<NodeId>,
+    /// Nothing reads the paths' node, edge and cost lists (stats mode, or a stream yielding none of
+    /// them), so a run keeps only the distances.
+    pub count_only: bool,
     /// Bucket width delta (`delta`, default 0 = derived from the largest weight).
     pub delta: f64,
 }
@@ -113,6 +116,7 @@ impl GraphAlgorithm for DeltaStepping {
         Ok(DeltaSteppingConfig {
             source: NodeId(source as u64),
             target,
+            count_only: crate::algorithms::procedure::path_lists_unread(params),
             delta,
         })
     }
@@ -132,7 +136,7 @@ impl GraphAlgorithm for DeltaStepping {
         // unit weights: distances are hop counts and delta-stepping degenerates to BFS, so the buckets
         // are pure overhead; use queue BFS
         if graph.is_unit_weighted() {
-            return bfs_sssp(graph, cfg.source, cfg.target, cap, cancel);
+            return bfs_sssp(graph, cfg.source, cfg.target, cfg.count_only, cap, cancel);
         }
 
         // no delta given: derive it from the max weight
@@ -269,6 +273,17 @@ impl GraphAlgorithm for DeltaStepping {
             if !dist[target.0 as usize].is_finite() {
                 return;
             }
+            if cfg.count_only {
+                out_paths.push(PathRecord {
+                    source: cfg.source,
+                    target,
+                    total_cost: dist[target.0 as usize],
+                    node_ids: Vec::new(),
+                    edge_ids: Vec::new(),
+                    costs: Vec::new(),
+                });
+                return;
+            }
             let mut nodes_rev: Vec<NodeId> = Vec::new();
             let mut edges_rev: Vec<EdgeId> = Vec::new();
             let mut costs_rev: Vec<f64> = Vec::new();
@@ -316,20 +331,21 @@ impl GraphAlgorithm for DeltaStepping {
 /// `Vec<NodeId>` frontiers, dense pred + cost arrays. What delta-stepping
 /// degenerates to with equal weights, so unit projections go straight here.
 ///
-/// Without a `target`, [`bfs_sssp_count_only`] skips `pred[]` / `pred_edge[]`
-/// writes (2 of 3 stores per neighbor) and uses `u32` distances (4x denser
-/// than `f64`).
+/// Without a `target`, when nothing reads the path lists (stats mode, or a stream
+/// yielding none), [`bfs_sssp_count_only`] skips `pred[]` / `pred_edge[]` writes
+/// (2 of 3 stores per neighbor) and uses `u32` distances (4x denser than `f64`).
 fn bfs_sssp(
     graph: &dyn AlgorithmGraph,
     source: NodeId,
     target: Option<NodeId>,
+    count_only: bool,
     cap: usize,
     cancel: &CancellationToken,
 ) -> Result<PathResult, AlgorithmError> {
     let s_idx = source.0 as usize;
     let slice_path = graph.outgoing_adj_slice(source).is_some();
 
-    if target.is_none() {
+    if target.is_none() && count_only {
         return bfs_sssp_count_only(graph, source, cap, slice_path, cancel);
     }
 
@@ -381,59 +397,186 @@ fn bfs_sssp(
         std::mem::swap(&mut current, &mut next);
     }
 
-    // target given: one path back through pred[]/pred_edge[]
-    let t = target.unwrap();
-    if dist[t.0 as usize].is_finite() {
+    // one path back through pred[]/pred_edge[] per target: the given one, else every reachable
+    // node but the source
+    let path_to = |t: NodeId| -> Option<PathRecord> {
+        if !dist[t.0 as usize].is_finite() {
+            return None;
+        }
         let mut nodes_rev: Vec<NodeId> = Vec::new();
         let mut edges_rev: Vec<EdgeId> = Vec::new();
         let mut costs_rev: Vec<f64> = Vec::new();
         let mut cur = t;
-        let ok = loop {
+        loop {
             nodes_rev.push(cur);
             costs_rev.push(dist[cur.0 as usize]);
             if cur == source {
-                break true;
+                break;
             }
             let p = pred[cur.0 as usize];
             if p == SENTINEL {
-                break false;
+                return None;
             }
             edges_rev.push(EdgeId(pred_edge[cur.0 as usize]));
             cur = NodeId(p as u64);
-        };
-        if ok {
-            nodes_rev.reverse();
-            edges_rev.reverse();
-            costs_rev.reverse();
-            return Ok(PathResult {
-                paths: vec![PathRecord {
-                    source,
-                    target: t,
-                    total_cost: dist[t.0 as usize],
-                    node_ids: nodes_rev,
-                    edge_ids: edges_rev,
-                    costs: costs_rev,
-                }],
-            });
         }
-    }
-    Ok(PathResult { paths: Vec::new() })
+        nodes_rev.reverse();
+        edges_rev.reverse();
+        costs_rev.reverse();
+        Some(PathRecord {
+            source,
+            target: t,
+            total_cost: dist[t.0 as usize],
+            node_ids: nodes_rev,
+            edge_ids: edges_rev,
+            costs: costs_rev,
+        })
+    };
+    let paths = match target {
+        Some(t) => path_to(t).into_iter().collect(),
+        None => (0..cap)
+            .filter(|&i| i != s_idx)
+            .filter_map(|i| path_to(NodeId(i as u64)))
+            .collect(),
+    };
+    Ok(PathResult { paths })
 }
 
 /// No-target BFS keeping only `dist[]` (no predecessor arrays: 2 of 3 stores per neighbor saved),
-/// as `u32` hops, so per-node state drops from 16 B to 4 B. One placeholder PathRecord per
-/// reachable node keeps `pathCount` right for stats.
-fn bfs_sssp_count_only(
+/// as `u32` hops, so per-node state drops from 16 B to 4 B. One PathRecord per reachable node, its
+/// lists empty: `pathCount` for stats, target and cost for a stream.
+pub(super) fn bfs_sssp_count_only(
     graph: &dyn AlgorithmGraph,
     source: NodeId,
     cap: usize,
     slice_path: bool,
     cancel: &CancellationToken,
 ) -> Result<PathResult, AlgorithmError> {
-    const UNVISITED: u32 = u32::MAX;
-    let mut dist: Vec<u32> = vec![UNVISITED; cap];
     let s_idx = source.0 as usize;
-    dist[s_idx] = 0;
+    let dist = match (graph.out_adjacency(), graph.in_adjacency()) {
+        // a GDS snapshot's own arrays
+        (Some(out), Some(inn)) => dense_hops(out, inn, s_idx, cap, cancel)?,
+        _ => view_hops(graph, source, cap, slice_path, cancel)?,
+    };
+
+    let mut count = 0usize;
+    for i in 0..cap {
+        if dist[i] != UNVISITED && i != s_idx {
+            count += 1;
+        }
+    }
+    let mut paths: Vec<PathRecord> = Vec::with_capacity(count);
+    for i in 0..cap {
+        if i == s_idx {
+            continue;
+        }
+        let d = dist[i];
+        if d == UNVISITED {
+            continue;
+        }
+        paths.push(PathRecord {
+            source,
+            target: NodeId(i as u64),
+            total_cost: d as f64,
+            node_ids: Vec::new(),
+            edge_ids: Vec::new(),
+            costs: Vec::new(),
+        });
+    }
+    Ok(PathResult { paths })
+}
+
+/// A node no BFS level reached.
+const UNVISITED: u32 = u32::MAX;
+
+/// A projection's dense lists, the second one if it has two (UNDIRECTED).
+type Lists<'a> = (DenseAdjacency<'a>, Option<DenseAdjacency<'a>>);
+
+/// Hops from `source` over a projection's dense CSR, direction-optimizing (Beamer, Asanović and
+/// Patterson, SC'12): a level whose frontier holds a large share of the relationships left to
+/// explore runs bottom-up, each unvisited node scanning its in-neighbors for one on the frontier
+/// and stopping at the first, so the dense middle levels of a small-world graph touch a fraction of
+/// their edges. The levels are the ones a plain BFS finds.
+fn dense_hops(
+    out: Lists<'_>,
+    inn: Lists<'_>,
+    source: usize,
+    n: usize,
+    cancel: &CancellationToken,
+) -> Result<Vec<u32>, AlgorithmError> {
+    // GAP's thresholds: bottom-up once the frontier's edges exceed 1/ALPHA of the unexplored ones,
+    // back once the frontier is under 1/BETA of the nodes
+    const ALPHA: usize = 15;
+    const BETA: usize = 18;
+    fn rows<'a>(l: &Lists<'a>, i: usize) -> [&'a [u32]; 2] {
+        [l.0.neighbors(i), l.1.map_or(&[][..], |a| a.neighbors(i))]
+    }
+    let out_degree = |i: usize| rows(&out, i).iter().map(|r| r.len()).sum::<usize>();
+    let mut dist = vec![UNVISITED; n];
+    dist[source] = 0;
+    let mut unexplored = (out.0.targets.len() + out.1.map_or(0, |a| a.targets.len()))
+        .saturating_sub(out_degree(source));
+    let mut frontier: Vec<u32> = vec![source as u32];
+    let mut next: Vec<u32> = Vec::new();
+    let mut depth: u32 = 0;
+    let mut bottom_up = false;
+    while !frontier.is_empty() {
+        cancel.check()?;
+        depth += 1;
+        bottom_up = if bottom_up {
+            frontier.len() >= n / BETA
+        } else {
+            frontier
+                .iter()
+                .map(|&u| out_degree(u as usize))
+                .sum::<usize>()
+                > unexplored / ALPHA
+        };
+        if bottom_up {
+            for v in 0..n {
+                if dist[v] != UNVISITED {
+                    continue;
+                }
+                let on_frontier = rows(&inn, v)
+                    .iter()
+                    .any(|r| r.iter().any(|&u| dist[u as usize] == depth - 1));
+                if on_frontier {
+                    dist[v] = depth;
+                    next.push(v as u32);
+                }
+            }
+        } else {
+            for &u in &frontier {
+                for r in rows(&out, u as usize) {
+                    for &v in r {
+                        if dist[v as usize] == UNVISITED {
+                            dist[v as usize] = depth;
+                            next.push(v);
+                        }
+                    }
+                }
+            }
+        }
+        for &v in &next {
+            unexplored = unexplored.saturating_sub(out_degree(v as usize));
+        }
+        frontier.clear();
+        std::mem::swap(&mut frontier, &mut next);
+    }
+    Ok(dist)
+}
+
+/// Hops from `source` over the projection's own reads: its packed adjacency when unfiltered, else
+/// `for_each_out`.
+fn view_hops(
+    graph: &dyn AlgorithmGraph,
+    source: NodeId,
+    cap: usize,
+    slice_path: bool,
+    cancel: &CancellationToken,
+) -> Result<Vec<u32>, AlgorithmError> {
+    let mut dist: Vec<u32> = vec![UNVISITED; cap];
+    dist[source.0 as usize] = 0;
 
     let initial_cap = (cap / 16).max(256);
     let mut current: Vec<NodeId> = Vec::with_capacity(initial_cap);
@@ -471,32 +614,7 @@ fn bfs_sssp_count_only(
         current.clear();
         std::mem::swap(&mut current, &mut next);
     }
-
-    let mut count = 0usize;
-    for i in 0..cap {
-        if dist[i] != UNVISITED && i != s_idx {
-            count += 1;
-        }
-    }
-    let mut paths: Vec<PathRecord> = Vec::with_capacity(count);
-    for i in 0..cap {
-        if i == s_idx {
-            continue;
-        }
-        let d = dist[i];
-        if d == UNVISITED {
-            continue;
-        }
-        paths.push(PathRecord {
-            source,
-            target: NodeId(i as u64),
-            total_cost: d as f64,
-            node_ids: Vec::new(),
-            edge_ids: Vec::new(),
-            costs: Vec::new(),
-        });
-    }
-    Ok(PathResult { paths })
+    Ok(dist)
 }
 
 /// Adds this algorithm to the current thread's registry.
@@ -510,6 +628,69 @@ mod tests {
     use crate::algorithms::projection::AlgorithmGraphView;
     use traverse_core::graph::Graph;
     use traverse_core::tx::view::GraphView;
+
+    /// Direction-optimizing levels on a GDS snapshot equal a plain BFS's on the live graph:
+    /// directed and undirected, on a graph dense enough for bottom-up levels, plus a far tail and
+    /// nodes nothing reaches.
+    #[test]
+    fn dense_hops_match_plain_bfs() {
+        use crate::algorithms::config::{BaseConfig, Orientation};
+        use crate::algorithms::materialized::MaterializedGraph;
+        let mut g = Graph::new();
+        let n: Vec<_> = (0..300)
+            .map(|_| g.create_node(&["N"], Default::default()))
+            .collect();
+        let mut x: u64 = 7;
+        for u in 0..240 {
+            for _ in 0..12 {
+                x = x
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let v = (x >> 33) as usize % 240;
+                g.create_edge(n[u], n[v], "T", Default::default()).unwrap();
+            }
+        }
+        // a chain hanging off the dense part (only reachable one way), the rest unreached
+        for i in 239..260 {
+            g.create_edge(n[i], n[i + 1], "T", Default::default())
+                .unwrap();
+        }
+        let view: &(dyn GraphView + Sync) = &g;
+        for (orientation, undirected) in [
+            (Orientation::Natural, false),
+            (Orientation::Undirected, true),
+        ] {
+            let live = AlgorithmGraphView::new(
+                view,
+                &BaseConfig {
+                    orientation,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let mat = MaterializedGraph::build(view, &[], &[], None, undirected).unwrap();
+            for source in [0usize, 17, 250] {
+                let cap = mat.highest_node_id() as usize;
+                let want = view_hops(
+                    &live,
+                    NodeId(source as u64),
+                    cap,
+                    false,
+                    &CancellationToken::none(),
+                )
+                .unwrap();
+                let got = dense_hops(
+                    mat.out_adjacency().unwrap(),
+                    mat.in_adjacency().unwrap(),
+                    source,
+                    cap,
+                    &CancellationToken::none(),
+                )
+                .unwrap();
+                assert_eq!(got, want, "{orientation:?} from {source}");
+            }
+        }
+    }
 
     #[test]
     fn matches_dijkstra_on_small_graph() {
@@ -529,6 +710,7 @@ mod tests {
                     source: a,
                     target: Some(c),
                     delta: 0.0,
+                    count_only: false,
                 },
                 &CancellationToken::none(),
             )

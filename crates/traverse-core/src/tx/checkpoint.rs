@@ -132,15 +132,6 @@ impl Checkpoint<'_> {
 }
 
 impl RecordSource for Checkpoint<'_> {
-    fn for_each_record(
-        &self,
-        node: &mut dyn FnMut(&Node) -> Result<()>,
-        edge: &mut dyn FnMut(&Edge) -> Result<()>,
-    ) -> Result<()> {
-        self.nodes_by_id(&self.read.nodes_vec(), node)?;
-        self.edges_by_id(&self.read.all_edges_vec(), edge)
-    }
-
     fn nodes_by_id(&self, ids: &[NodeId], f: &mut dyn FnMut(&Node) -> Result<()>) -> Result<()> {
         let mut nodes = Vec::with_capacity(BATCH.min(ids.len()));
         for ids in ids.chunks(BATCH) {
@@ -160,6 +151,41 @@ impl RecordSource for Checkpoint<'_> {
             self.read.edges_at(ids, &mut edges);
             for edge in &edges {
                 f(edge)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Reads [`BATCH`] records per structural read lock and hands them over `batch` at a time:
+    /// the writer lays each batch into pages of its own, so one record at a time would take a
+    /// page per record.
+    fn for_each_record_batch(
+        &self,
+        batch: usize,
+        nodes: &mut dyn FnMut(&[&Node]) -> Result<()>,
+        edges: &mut dyn FnMut(&[&Edge]) -> Result<()>,
+    ) -> Result<()> {
+        let batch = batch.max(1);
+        let ids = self.read.nodes_vec();
+        let mut owned: Vec<Node> = Vec::with_capacity(batch.min(ids.len()));
+        for ids in ids.chunks(batch) {
+            owned.clear();
+            for ids in ids.chunks(BATCH) {
+                self.read.nodes_at(ids, &mut owned);
+            }
+            if !owned.is_empty() {
+                nodes(&owned.iter().collect::<Vec<_>>())?;
+            }
+        }
+        let ids = self.read.all_edges_vec();
+        let mut owned: Vec<Edge> = Vec::with_capacity(batch.min(ids.len()));
+        for ids in ids.chunks(batch) {
+            owned.clear();
+            for ids in ids.chunks(BATCH) {
+                self.read.edges_at(ids, &mut owned);
+            }
+            if !owned.is_empty() {
+                edges(&owned.iter().collect::<Vec<_>>())?;
             }
         }
         Ok(())
@@ -241,6 +267,43 @@ mod tests {
             .collect();
         assert_eq!(indexes, ["pv"]);
         open.abort();
+    }
+
+    /// Records share pages: the writer lays each batch it's handed into pages of its own, so a
+    /// checkpoint handing over one record at a time wrote a 16 KiB page per record (a 100 MB
+    /// graph became a 30 GB file).
+    #[test]
+    fn a_checkpoint_packs_records_into_pages() {
+        let mut g = Graph::new();
+        let ids: Vec<NodeId> = (0..3000).map(|i| g.create_node(&["P"], v(i))).collect();
+        for (i, pair) in ids.windows(2).enumerate() {
+            let props = if i % 3 == 0 {
+                v(i as i64)
+            } else {
+                BTreeMap::new()
+            };
+            g.create_edge(pair[0], pair[1], "R", props).unwrap();
+        }
+        let store = MvccStore::new(g);
+        // a commit after the checkpoint: its records come through the versioned read path
+        let checkpoint = store.checkpoint().unwrap();
+        let mut w = store.begin_write();
+        GraphView::create_node(&mut w, &["Q"], v(-1)).unwrap();
+        w.commit().unwrap();
+
+        let mut pm = PageManager::create_in_memory();
+        codec::write_checkpoint(&mut pm, &checkpoint, &[]).unwrap();
+        let bytes = pm.to_bytes();
+        assert!(
+            bytes.len() < 1 << 20,
+            "{} bytes for 5999 records: a page per record?",
+            bytes.len()
+        );
+        let g = codec::load_graph(PageManager::open_from_bytes(bytes).unwrap())
+            .unwrap()
+            .0;
+        assert_eq!((g.node_count(), g.edge_count()), (3000, 2999));
+        assert_eq!(v_of(&g, ids[2999]), Some(PropertyValue::Int(2999)));
     }
 
     #[test]

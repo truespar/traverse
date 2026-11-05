@@ -202,7 +202,7 @@ fn run_mode_on<A: GraphAlgorithm>(
     mode: ProcedureMode,
     yield_columns: Option<&[&str]>,
 ) -> Result<ProcedureOutput, AlgorithmError> {
-    let algo_config = algorithm.parse_config(args)?;
+    let algo_config = algorithm.parse_config(&mode_args(args, mode, yield_columns))?;
     let cancel = CancellationToken::current();
     let started = Instant::now();
     let result = algorithm.run(proj, &algo_config, &cancel)?;
@@ -214,6 +214,49 @@ fn run_mode_on<A: GraphAlgorithm>(
             "write mode is not available on materialized projections".into(),
         )),
     }
+}
+
+/// Internal config key a stats run carries, so an engine can skip what only stream rows read
+/// (single-source paths: the paths themselves).
+const STATS_ONLY_KEY: &str = "__stats_only";
+
+/// Whether this run is in stats mode (see [`STATS_ONLY_KEY`]).
+pub(crate) fn stats_only(params: &BTreeMap<String, CypherValue>) -> bool {
+    matches!(params.get(STATS_ONLY_KEY), Some(CypherValue::Bool(true)))
+}
+
+/// Internal config key a stream run carries when its YIELD takes none of a path's lists (`nodeIds`,
+/// `edgeIds`, `costs`, nor a `path` built from them), so single-source engines skip rebuilding
+/// each path.
+const NO_PATH_LISTS_KEY: &str = "__no_path_lists";
+
+/// The path columns a stream row builds from the node, edge and cost lists.
+const PATH_LIST_COLUMNS: &[&str] = &["nodeIds", "edgeIds", "costs", "path"];
+
+/// Whether nothing reads this run's path lists: stats mode, or a stream yielding none of them (see
+/// [`NO_PATH_LISTS_KEY`]).
+pub(crate) fn path_lists_unread(params: &BTreeMap<String, CypherValue>) -> bool {
+    stats_only(params) || matches!(params.get(NO_PATH_LISTS_KEY), Some(CypherValue::Bool(true)))
+}
+
+/// `args` as the algorithm parses them in `mode`, yielding `yield_columns` (`None`: every column).
+fn mode_args<'a>(
+    args: &'a BTreeMap<String, CypherValue>,
+    mode: ProcedureMode,
+    yield_columns: Option<&[&str]>,
+) -> std::borrow::Cow<'a, BTreeMap<String, CypherValue>> {
+    let key = match mode {
+        ProcedureMode::Stats => STATS_ONLY_KEY,
+        ProcedureMode::Stream
+            if yield_columns.is_some_and(|y| !y.iter().any(|c| PATH_LIST_COLUMNS.contains(c))) =>
+        {
+            NO_PATH_LISTS_KEY
+        }
+        _ => return std::borrow::Cow::Borrowed(args),
+    };
+    let mut a = args.clone();
+    a.insert(key.to_string(), CypherValue::Bool(true));
+    std::borrow::Cow::Owned(a)
 }
 
 /// Builds and registers in one call.
@@ -232,7 +275,7 @@ fn run_mode<A: GraphAlgorithm>(
 ) -> Result<ProcedureOutput, AlgorithmError> {
     // 1. parse configs
     let base = BaseConfig::parse(args).map_err(AlgorithmError::from)?;
-    let algo_config = algorithm.parse_config(args)?;
+    let algo_config = algorithm.parse_config(&mode_args(args, mode, yield_columns))?;
     let cancel = CancellationToken::current();
 
     // 2. read phase: compute on an immutable parallel-safe view, scoped so the borrow ends before
@@ -274,17 +317,8 @@ fn materialize_stream<R: AlgorithmResult + ?Sized>(
     result: &R,
     yield_columns: Option<&[&str]>,
 ) -> ProcedureOutput {
-    use rayon::prelude::*;
     let columns = result.columns().to_vec();
-    let rows = result
-        .stream_rows_filtered(yield_columns)
-        .into_par_iter()
-        .map(|row| {
-            row.into_iter()
-                .map(|(k, v)| (std::borrow::Cow::Borrowed(k), v))
-                .collect::<Vec<_>>()
-        })
-        .collect();
+    let rows = result.stream_rows_filtered(yield_columns);
     ProcedureOutput { rows, columns }
 }
 

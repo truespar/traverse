@@ -19,7 +19,7 @@ use super::{
 
 impl Connection {
     /// Streams PULL results straight to the wire, no bulk `Vec<ServerMessage>`. Lazy results
-    /// (morsel pipeline output) go Frame -> CypherValue -> PackStream one row at a time, each written
+    /// (morsel pipeline output) go typed lane -> PackStream one row at a time, each written
     /// immediately, so only one row's `CypherValue` / `PackStream::Value` exists at once.
     /// Materialized results are written record by record too.
     pub(super) async fn handle_pull_streaming<W: AsyncWrite + Unpin>(
@@ -148,7 +148,6 @@ impl Connection {
                                     let bolt_major = self.version.major;
                                     let ser_start = Instant::now();
                                     let mut sent = 0usize;
-                                    let slot_indices = lazy.column_slot_indices();
                                     let mut batch_buf = std::mem::take(&mut self.batch_buf);
                                     batch_buf.clear();
                                     batch_buf.reserve(65536);
@@ -169,17 +168,19 @@ impl Connection {
                                             loop {
                                                 let t =
                                                     if trace { Some(Instant::now()) } else { None };
-                                                let next = lazy.next_frame(&read_tx);
+                                                if sent & 0xFFF == 0xFFF
+                                                    && let Err(e) =
+                                                        traverse_cypher::query::check_interrupt()
+                                                {
+                                                    failure = Some(e);
+                                                    break true;
+                                                }
+                                                let next = lazy.next_lanes();
                                                 if let Some(t) = t {
                                                     t_frame_iter += t.elapsed();
                                                 }
-                                                let frame = match next {
-                                                    Ok(Some(frame)) => frame,
-                                                    Ok(None) => break true,
-                                                    Err(e) => {
-                                                        failure = Some(e);
-                                                        break true;
-                                                    }
+                                                let Some(row) = next else {
+                                                    break true;
                                                 };
                                                 // encode the record into a temp buffer, then
                                                 // chunk it into the batch buffer; one record can
@@ -188,10 +189,9 @@ impl Connection {
                                                 let t_enc =
                                                     if trace { Some(Instant::now()) } else { None };
                                                 let record_start = batch_buf.len();
-                                                packstream::encode::encode_record_from_slots(
+                                                packstream::encode::encode_record(
                                                     &mut batch_buf,
-                                                    &frame,
-                                                    &slot_indices,
+                                                    &row,
                                                     &read_tx,
                                                     bolt_major,
                                                 );

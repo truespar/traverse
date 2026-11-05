@@ -7,8 +7,6 @@ use traverse_core::tx::view::GraphView;
 
 use crate::error::CypherError;
 
-use super::expand::resolve_edge_type_filter;
-
 /// `(EdgeId, neighbor)` pairs of `node` in `direction`, filtered by type.
 fn expand_node(
     graph: &dyn GraphView,
@@ -724,6 +722,24 @@ pub(crate) fn dijkstra_single_shortest(
     }
 
     Ok(None) // no path
+}
+
+/// Edge-type names -> interned ids; `None` for no filter. A name the graph never interned
+/// matches nothing.
+pub(crate) fn resolve_edge_type_filter(
+    graph: &dyn GraphView,
+    edge_types: &[String],
+) -> Option<FxHashSet<EdgeTypeId>> {
+    if edge_types.is_empty() {
+        return None;
+    }
+    let st = graph.strings();
+    Some(
+        edge_types
+            .iter()
+            .filter_map(|t| st.get(t).map(EdgeTypeId))
+            .collect(),
+    )
 }
 
 #[cfg(test)]

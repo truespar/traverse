@@ -6,6 +6,7 @@ use rustc_hash::FxHashSet;
 
 use crate::error::Result;
 use crate::graph::adjacency::AdjacencySnapshot;
+use crate::graph::batch::{AdjBatch, ColumnBound, ColumnCmp, ColumnSink};
 use crate::graph::constraint::{ConstraintRegistry, ConstraintType};
 use crate::graph::edge::Edge;
 use crate::graph::index::{EdgeIndexCatalog, IndexCatalog};
@@ -228,6 +229,171 @@ pub trait GraphView {
         Ok(())
     }
 
+    // -- Batch access -----------------------------------------------------
+    // The vectorized engine reads through these: one call per batch, typed columns out, no
+    // per-entity clone. The defaults are correct over the per-entity methods; `Graph`,
+    // `ReadTx` and `OptimisticTx` override them with one-lock implementations.
+
+    /// Pushes `keys[j]` of every node in `ids` into `sinks[j]`, in order: exactly one push per
+    /// node per sink, a null for a missing node or key. Returns how many ids named no node.
+    fn gather_node_props(
+        &self,
+        ids: &[NodeId],
+        keys: &[PropertyKeyId],
+        sinks: &mut [&mut dyn ColumnSink],
+    ) -> Result<usize> {
+        let mut missing = 0;
+        for &id in ids {
+            match self.get_node(id) {
+                Ok(node) => node.properties.get_multi_into(keys, sinks),
+                Err(_) => {
+                    missing += 1;
+                    for s in sinks.iter_mut() {
+                        s.push_null();
+                    }
+                }
+            }
+        }
+        Ok(missing)
+    }
+
+    /// [`gather_node_props`](Self::gather_node_props) for relationships.
+    fn gather_edge_props(
+        &self,
+        ids: &[EdgeId],
+        keys: &[PropertyKeyId],
+        sinks: &mut [&mut dyn ColumnSink],
+    ) -> Result<usize> {
+        let mut missing = 0;
+        for &id in ids {
+            match self.get_edge(id) {
+                Ok(edge) => edge.properties.get_multi_into(keys, sinks),
+                Err(_) => {
+                    missing += 1;
+                    for s in sinks.iter_mut() {
+                        s.push_null();
+                    }
+                }
+            }
+        }
+        Ok(missing)
+    }
+
+    /// Whether each node in `ids` exists in this view; `out` is cleared and filled in order.
+    fn nodes_exist(&self, ids: &[NodeId], out: &mut Vec<bool>) {
+        out.clear();
+        out.extend(ids.iter().map(|&id| self.get_node(id).is_ok()));
+    }
+
+    /// Whether each edge in `ids` exists in this view; `out` is cleared and filled in order.
+    fn edges_exist(&self, ids: &[EdgeId], out: &mut Vec<bool>) {
+        out.clear();
+        out.extend(ids.iter().map(|&id| self.get_edge(id).is_ok()));
+    }
+
+    /// Whether each node in `ids` has `label` (`false` for a missing node); `out` is cleared
+    /// and filled in order.
+    fn nodes_have_label(&self, ids: &[NodeId], label: LabelId, out: &mut Vec<bool>) {
+        out.clear();
+        out.extend(
+            ids.iter()
+                .map(|&id| self.has_label(id, label).unwrap_or(false)),
+        );
+    }
+
+    /// Nodes with `label`, counted without listing them.
+    fn count_nodes_by_label(&self, label: &str) -> usize {
+        self.nodes_by_label(label).len()
+    }
+
+    /// Edges of `edge_type`, counted without listing them.
+    fn count_edges_by_type(&self, edge_type: &str) -> usize {
+        self.edges_by_type(edge_type).len()
+    }
+
+    /// Entries of the `(label, prop)` index with exactly `value`, counted without listing them;
+    /// `None` without such an index.
+    fn count_index_lookup(&self, label: &str, prop: &str, value: &IndexKey) -> Option<usize> {
+        self.index_lookup(label, prop, value).map(|v| v.len())
+    }
+
+    /// The nodes with `label` whose `prop` satisfies `cmp` against `bound`, counted in storage;
+    /// `None` when the view can't answer exactly that way.
+    fn count_nodes_where(
+        &self,
+        _label: &str,
+        _prop: &str,
+        _cmp: ColumnCmp,
+        _bound: &ColumnBound,
+    ) -> Option<usize> {
+        None
+    }
+
+    /// The nodes with `label` whose `prop` satisfies `cmp` against `bound`, listed in storage
+    /// in id order; `None` when the view can't answer exactly that way.
+    fn nodes_where(
+        &self,
+        _label: &str,
+        _prop: &str,
+        _cmp: ColumnCmp,
+        _bound: &ColumnBound,
+    ) -> Option<Vec<NodeId>> {
+        None
+    }
+
+    /// The share of the `(label, prop)` index a key range covers, estimated from the key
+    /// extremes; `None` without an index, or when the keys aren't numeric. For choosing a plan,
+    /// not for counting.
+    fn index_range_estimate(
+        &self,
+        _label: &str,
+        _prop: &str,
+        _lower: &std::ops::Bound<IndexKey>,
+        _upper: &std::ops::Bound<IndexKey>,
+    ) -> Option<f64> {
+        None
+    }
+
+    /// Entries of the `(label, prop)` index in a key range, counted without listing them; `None`
+    /// without such an index.
+    fn count_index_range(
+        &self,
+        label: &str,
+        prop: &str,
+        lower: std::ops::Bound<IndexKey>,
+        upper: std::ops::Bound<IndexKey>,
+    ) -> Option<usize> {
+        self.index_range_lookup(label, prop, lower, upper)
+            .map(|v| v.len())
+    }
+
+    /// Edges of every source in `srcs` in `dir`, filtered by type, appended to `out` in source
+    /// order. An undirected expansion lists a self-loop once. A missing source is an error.
+    fn expand_batch(
+        &self,
+        srcs: &[NodeId],
+        dir: Direction,
+        type_filter: &Option<FxHashSet<EdgeTypeId>>,
+        out: &mut AdjBatch,
+    ) -> Result<()> {
+        for (lane, &src) in srcs.iter().enumerate() {
+            for ep in self.edges_with_neighbor(src, dir, None)? {
+                if let Some(allowed) = type_filter
+                    && !allowed.contains(&ep.edge_type)
+                {
+                    continue;
+                }
+                let outgoing = ep.source == src;
+                // an undirected self-loop shows up in both adjacency lists
+                if dir == Direction::Both && ep.neighbor == src && !outgoing {
+                    continue;
+                }
+                out.push(lane as u32, ep.edge_id, ep.edge_type, ep.neighbor, outgoing);
+            }
+        }
+        Ok(())
+    }
+
     // -- Whole-graph adjacency -----------------------------------------
 
     /// Adjacency for whole-graph algorithms, fixed for the snapshot's life and exact for this
@@ -430,6 +596,23 @@ pub trait GraphView {
     /// Degree of `node` in `dir`.
     fn degree(&self, node: NodeId, dir: Direction) -> Result<usize>;
 
+    /// The nodes with `label` as a bitmap over node ids (bit `i` set: node `i` has the label),
+    /// when the view can hand one out cheaply; `None` means list the ids instead.
+    fn label_bitmap(&self, _label: &str) -> Option<Vec<u64>> {
+        None
+    }
+
+    /// How many edges start and end on the same node, when the view knows exactly.
+    fn self_loops(&self) -> Option<usize> {
+        None
+    }
+
+    /// Degrees of `ids` in `dir` into `out` (0 for a missing node), in one pass.
+    fn degrees(&self, ids: &[NodeId], dir: Direction, out: &mut Vec<usize>) {
+        out.clear();
+        out.extend(ids.iter().map(|&n| self.degree(n, dir).unwrap_or(0)));
+    }
+
     /// String table.
     fn strings(&self) -> &StringTable;
 
@@ -524,6 +707,17 @@ pub trait GraphView {
 
     /// Node IDs via a property index.
     fn index_lookup(&self, label: &str, prop: &str, value: &IndexKey) -> Option<Vec<NodeId>>;
+
+    /// Nodes, whatever their labels, whose `prop` is `value`, through the label indexes on `prop`
+    /// when they cover every node this view sees; `None` otherwise, and the caller scans.
+    fn property_seek(&self, _prop: &str, _value: &IndexKey) -> Option<Vec<NodeId>> {
+        None
+    }
+
+    /// Whether [`property_seek`](Self::property_seek) answers for `prop` as things stand.
+    fn property_seek_covers(&self, _prop: &str) -> bool {
+        false
+    }
 
     /// Node IDs in a key range via a property index.
     fn index_range_lookup(

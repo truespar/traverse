@@ -342,12 +342,21 @@ fn dp_join_order(
     }
 
     // best plan for the full set
-    dp.remove(&total_mask)
-        .map(|(plan, _, _)| plan)
-        .unwrap_or_else(|| {
-            // fallback: plain chain
-            build_chain(relations, filters)
-        })
+    let Some((mut plan, _, applied)) = dp.remove(&total_mask) else {
+        // fallback: plain chain
+        return build_chain(relations, filters);
+    };
+    // filters no subset covers (a quantifier's own variable counts as one it reads, as do outer
+    // variables a subquery seeds) go on top, like the greedy order's remaining ones
+    for (fi, f) in filters.into_iter().enumerate() {
+        if fi >= 64 || applied & (1u64 << fi) == 0 {
+            plan = LogicalPlan::Filter {
+                input: Box::new(plan),
+                predicate: f,
+            };
+        }
+    }
+    plan
 }
 
 /// Greedy join order beyond DP_LIMIT relations.

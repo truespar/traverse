@@ -114,11 +114,14 @@ impl GraphAlgorithm for KCore {
                                 list.push(u.0 as u32);
                             }
                         });
-                        graph.for_each_in(v, &mut |u, _eid, _w| {
-                            if u.0 != vp {
-                                list.push(u.0 as u32);
-                            }
-                        });
+                        // an undirected projection lists both directions as out already
+                        if !graph.is_undirected() {
+                            graph.for_each_in(v, &mut |u, _eid, _w| {
+                                if u.0 != vp {
+                                    list.push(u.0 as u32);
+                                }
+                            });
+                        }
                     }
                 }
                 (v.0 as usize, list)

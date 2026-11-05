@@ -264,8 +264,6 @@ fn collect_plan_variables(plan: &LogicalPlan, out: &mut HashSet<String>) {
             out.insert(variable.clone());
             collect_plan_variables(body, out);
         }
-        // runtime-only leaf: carries frames, not named variables
-        LogicalPlan::SeededRows(_) => {}
         LogicalPlan::ShortestPath {
             input,
             from,
@@ -365,7 +363,6 @@ pub fn recurse_transform(plan: LogicalPlan, f: &dyn Fn(LogicalPlan) -> LogicalPl
         | LogicalPlan::EdgeTypeScan { .. }
         | LogicalPlan::ScanFilterProject { .. }
         | LogicalPlan::EmptyRow
-        | LogicalPlan::SeededRows(_)
         | LogicalPlan::CreateIndex { .. }
         | LogicalPlan::CreateVectorIndex { .. }
         | LogicalPlan::CreateFulltextIndex { .. }

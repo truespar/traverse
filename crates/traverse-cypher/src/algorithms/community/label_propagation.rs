@@ -179,12 +179,15 @@ fn compute_label(
                     *tally.entry(label).or_insert(0.0) += 1.0;
                 }
             });
-            graph.for_each_out(v, &mut |u, _eid, _w| {
-                let label = labels[u.0 as usize];
-                if label != u64::MAX {
-                    *tally.entry(label).or_insert(0.0) += 1.0;
-                }
-            });
+            // an undirected projection lists both directions as out already
+            if !graph.is_undirected() {
+                graph.for_each_out(v, &mut |u, _eid, _w| {
+                    let label = labels[u.0 as usize];
+                    if label != u64::MAX {
+                        *tally.entry(label).or_insert(0.0) += 1.0;
+                    }
+                });
+            }
         }
     } else {
         graph.for_each_in(v, &mut |u, _eid, w| {
@@ -193,12 +196,15 @@ fn compute_label(
                 *tally.entry(label).or_insert(0.0) += w;
             }
         });
-        graph.for_each_out(v, &mut |u, _eid, w| {
-            let label = labels[u.0 as usize];
-            if label != u64::MAX {
-                *tally.entry(label).or_insert(0.0) += w;
-            }
-        });
+        // an undirected projection lists both directions as out already
+        if !graph.is_undirected() {
+            graph.for_each_out(v, &mut |u, _eid, w| {
+                let label = labels[u.0 as usize];
+                if label != u64::MAX {
+                    *tally.entry(label).or_insert(0.0) += w;
+                }
+            });
+        }
     }
     if tally.is_empty() {
         return None;
@@ -225,8 +231,16 @@ fn greedy_color(
     // total degree descending: hubs have the most constraints, color them first
     let mut ordered: Vec<traverse_core::graph::types::NodeId> = nodes.to_vec();
     ordered.sort_by(|a, b| {
-        let da = graph.out_degree(*a) + graph.in_degree(*a);
-        let db = graph.out_degree(*b) + graph.in_degree(*b);
+        let degree = |n| {
+            // an undirected projection's out-degree counts both directions already
+            graph.out_degree(n)
+                + if graph.is_undirected() {
+                    0
+                } else {
+                    graph.in_degree(n)
+                }
+        };
+        let (da, db) = (degree(*a), degree(*b));
         db.cmp(&da)
     });
     let mut color_of: Vec<u32> = vec![u32::MAX; cap];
@@ -268,19 +282,22 @@ fn greedy_color(
                         touched.push(c);
                     }
                 });
-                graph.for_each_in(v, &mut |u, _, _| {
-                    let c = color_of[u.0 as usize];
-                    if c == u32::MAX {
-                        return;
-                    }
-                    if (c as usize) >= forbidden.len() {
-                        forbidden.resize(c as usize + 1, u32::MAX);
-                    }
-                    if forbidden[c as usize] != iter_round {
-                        forbidden[c as usize] = iter_round;
-                        touched.push(c);
-                    }
-                });
+                // an undirected projection lists both directions as out already
+                if !graph.is_undirected() {
+                    graph.for_each_in(v, &mut |u, _, _| {
+                        let c = color_of[u.0 as usize];
+                        if c == u32::MAX {
+                            return;
+                        }
+                        if (c as usize) >= forbidden.len() {
+                            forbidden.resize(c as usize + 1, u32::MAX);
+                        }
+                        if forbidden[c as usize] != iter_round {
+                            forbidden[c as usize] = iter_round;
+                            touched.push(c);
+                        }
+                    });
+                }
             }
         }
         // smallest free color

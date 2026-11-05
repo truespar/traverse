@@ -2,6 +2,7 @@
 //! iterator, a `stats()` summary and a `write_back()` bulk property write, so the procedure adapter
 //! builds `.stream` / `.stats` / `.write` rows without per-algorithm code.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use traverse_core::graph::types::{EdgeId, NodeId};
@@ -15,21 +16,55 @@ use crate::types::CypherValue;
 /// MAY skip building unwanted columns.
 pub type ColumnFilter<'a> = Option<&'a [&'a str]>;
 
+/// Below this many items a result builds its rows on the calling thread: handing the work to the
+/// pool costs a wake-up and two context switches per call, more than a few thousand rows take.
+const PAR_ROWS: usize = 16_384;
+
+/// One stream row per item that has one (`row(index, item)`), in item order: in parallel only for
+/// enough items (see [`PAR_ROWS`]).
+fn rows_of<T: Sync>(
+    items: &[T],
+    row: impl Fn(usize, &T) -> Option<StreamRow> + Sync + Send,
+) -> Vec<StreamRow> {
+    use rayon::prelude::*;
+    if items.len() < PAR_ROWS {
+        items
+            .iter()
+            .enumerate()
+            .filter_map(|(i, t)| row(i, t))
+            .collect()
+    } else {
+        items
+            .par_iter()
+            .enumerate()
+            .filter_map(|(i, t)| row(i, t))
+            .collect()
+    }
+}
+
+/// One `.stream` row: (column, value) pairs. The names are borrowed `&'static str` here and may be
+/// owned in summary rows, so the procedure output takes the rows as they are.
+pub type StreamRow = Vec<(Cow<'static, str>, CypherValue)>;
+
 /// Interface of every algorithm output.
 pub trait AlgorithmResult: Send + 'static {
     /// `.stream` rows as (column, value) pairs in declared column order.
-    fn stream_rows(&self) -> Vec<Vec<(&'static str, CypherValue)>>;
+    fn stream_rows(&self) -> Vec<StreamRow>;
 
     /// [`stream_rows`](Self::stream_rows) with a YIELD filter, so implementations can skip
     /// expensive unwanted columns. Default: `stream_rows` then filter; override for heavy columns
     /// (lists, embeddings, paths).
-    fn stream_rows_filtered(&self, wanted: ColumnFilter) -> Vec<Vec<(&'static str, CypherValue)>> {
+    fn stream_rows_filtered(&self, wanted: ColumnFilter) -> Vec<StreamRow> {
         let rows = self.stream_rows();
         match wanted {
             None => rows,
             Some(w) => rows
                 .into_iter()
-                .map(|row| row.into_iter().filter(|(k, _)| w.contains(k)).collect())
+                .map(|row| {
+                    row.into_iter()
+                        .filter(|(k, _)| w.contains(&k.as_ref()))
+                        .collect()
+                })
                 .collect(),
         }
     }
@@ -91,33 +126,28 @@ impl AlgorithmResult for NodeScalarResult {
         &["nodeId", "score"]
     }
 
-    fn stream_rows(&self) -> Vec<Vec<(&'static str, CypherValue)>> {
+    fn stream_rows(&self) -> Vec<StreamRow> {
         self.stream_rows_filtered(None)
     }
 
-    fn stream_rows_filtered(&self, wanted: ColumnFilter) -> Vec<Vec<(&'static str, CypherValue)>> {
-        // dense N-node outputs (pageRank, betweenness, ...): building every row serially dominates
-        // stream time; rows are independent, so par_iter
-        use rayon::prelude::*;
+    fn stream_rows_filtered(&self, wanted: ColumnFilter) -> Vec<StreamRow> {
+        // dense N-node outputs (pageRank, betweenness, ...): rows are independent, so a large
+        // result builds them in parallel (`rows_of`)
         let want_id = wanted.is_none_or(|w| w.contains(&"nodeId"));
         let want_score = wanted.is_none_or(|w| w.contains(&"score"));
-        self.values
-            .par_iter()
-            .enumerate()
-            .filter_map(|(i, &v)| {
-                if v.is_nan() {
-                    return None;
-                }
-                let mut row: Vec<(&'static str, CypherValue)> = Vec::with_capacity(2);
-                if want_id {
-                    row.push(("nodeId", CypherValue::Integer(i as i64)));
-                }
-                if want_score {
-                    row.push(("score", CypherValue::Float(v)));
-                }
-                Some(row)
-            })
-            .collect()
+        rows_of(&self.values, |i, &v| {
+            if v.is_nan() {
+                return None;
+            }
+            let mut row: StreamRow = Vec::with_capacity(2);
+            if want_id {
+                row.push((Cow::Borrowed("nodeId"), CypherValue::Integer(i as i64)));
+            }
+            if want_score {
+                row.push((Cow::Borrowed("score"), CypherValue::Float(v)));
+            }
+            Some(row)
+        })
     }
 
     fn stats(&self) -> BTreeMap<String, CypherValue> {
@@ -199,31 +229,26 @@ impl AlgorithmResult for NodeCommunityResult {
         &["nodeId", "communityId"]
     }
 
-    fn stream_rows(&self) -> Vec<Vec<(&'static str, CypherValue)>> {
+    fn stream_rows(&self) -> Vec<StreamRow> {
         self.stream_rows_filtered(None)
     }
 
-    fn stream_rows_filtered(&self, wanted: ColumnFilter) -> Vec<Vec<(&'static str, CypherValue)>> {
-        use rayon::prelude::*;
+    fn stream_rows_filtered(&self, wanted: ColumnFilter) -> Vec<StreamRow> {
         let want_id = wanted.is_none_or(|w| w.contains(&"nodeId"));
         let want_comm = wanted.is_none_or(|w| w.contains(&"communityId"));
-        self.values
-            .par_iter()
-            .enumerate()
-            .filter_map(|(i, &v)| {
-                if v == u64::MAX {
-                    return None;
-                }
-                let mut row: Vec<(&'static str, CypherValue)> = Vec::with_capacity(2);
-                if want_id {
-                    row.push(("nodeId", CypherValue::Integer(i as i64)));
-                }
-                if want_comm {
-                    row.push(("communityId", CypherValue::Integer(v as i64)));
-                }
-                Some(row)
-            })
-            .collect()
+        rows_of(&self.values, |i, &v| {
+            if v == u64::MAX {
+                return None;
+            }
+            let mut row: StreamRow = Vec::with_capacity(2);
+            if want_id {
+                row.push((Cow::Borrowed("nodeId"), CypherValue::Integer(i as i64)));
+            }
+            if want_comm {
+                row.push((Cow::Borrowed("communityId"), CypherValue::Integer(v as i64)));
+            }
+            Some(row)
+        })
     }
 
     fn stats(&self) -> BTreeMap<String, CypherValue> {
@@ -308,14 +333,13 @@ impl AlgorithmResult for NodeMultiResult {
         &["nodeId"]
     }
 
-    fn stream_rows(&self) -> Vec<Vec<(&'static str, CypherValue)>> {
+    fn stream_rows(&self) -> Vec<StreamRow> {
         self.stream_rows_filtered(None)
     }
 
-    fn stream_rows_filtered(&self, wanted: ColumnFilter) -> Vec<Vec<(&'static str, CypherValue)>> {
+    fn stream_rows_filtered(&self, wanted: ColumnFilter) -> Vec<StreamRow> {
         // skip filtered-out fields entirely (YIELD subsets of N fields cut CypherValue allocations
-        // per row accordingly); rows built in parallel
-        use rayon::prelude::*;
+        // per row accordingly)
         let want_id = wanted.is_none_or(|w| w.contains(&"nodeId"));
         let field_mask: Vec<bool> = self
             .fields
@@ -324,32 +348,27 @@ impl AlgorithmResult for NodeMultiResult {
             .collect();
         let field_mask_ref: &[bool] = &field_mask;
         let fields_ref: &[&'static str] = &self.fields;
-        self.values
-            .par_iter()
-            .enumerate()
-            .filter_map(|(i, fields)| {
-                if fields.iter().all(|x| x.is_nan()) {
-                    return None;
+        rows_of(&self.values, |i, fields| {
+            if fields.iter().all(|x| x.is_nan()) {
+                return None;
+            }
+            let mut row: StreamRow = Vec::with_capacity(1 + fields.len());
+            if want_id {
+                row.push((Cow::Borrowed("nodeId"), CypherValue::Integer(i as i64)));
+            }
+            for (fi, &v) in fields.iter().enumerate() {
+                if !field_mask_ref[fi] {
+                    continue;
                 }
-                let mut row: Vec<(&'static str, CypherValue)> =
-                    Vec::with_capacity(1 + fields.len());
-                if want_id {
-                    row.push(("nodeId", CypherValue::Integer(i as i64)));
+                let name = fields_ref[fi];
+                if v.is_nan() {
+                    row.push((Cow::Borrowed(name), CypherValue::Null));
+                } else {
+                    row.push((Cow::Borrowed(name), CypherValue::Float(v)));
                 }
-                for (fi, &v) in fields.iter().enumerate() {
-                    if !field_mask_ref[fi] {
-                        continue;
-                    }
-                    let name = fields_ref[fi];
-                    if v.is_nan() {
-                        row.push((name, CypherValue::Null));
-                    } else {
-                        row.push((name, CypherValue::Float(v)));
-                    }
-                }
-                Some(row)
-            })
-            .collect()
+            }
+            Some(row)
+        })
     }
 
     fn stats(&self) -> BTreeMap<String, CypherValue> {
@@ -437,36 +456,34 @@ impl AlgorithmResult for NodeVectorResult {
         &["nodeId", "embedding"]
     }
 
-    fn stream_rows(&self) -> Vec<Vec<(&'static str, CypherValue)>> {
+    fn stream_rows(&self) -> Vec<StreamRow> {
         self.stream_rows_filtered(None)
     }
 
-    fn stream_rows_filtered(&self, wanted: ColumnFilter) -> Vec<Vec<(&'static str, CypherValue)>> {
-        use rayon::prelude::*;
+    fn stream_rows_filtered(&self, wanted: ColumnFilter) -> Vec<StreamRow> {
         let want_id = wanted.is_none_or(|w| w.contains(&"nodeId"));
         let want_emb = wanted.is_none_or(|w| w.contains(&"embedding"));
         let values_ref: &[f32] = &self.values;
         let dim = self.dim;
-        (0..self.valid.len())
-            .into_par_iter()
-            .filter(|&i| self.valid[i])
-            .map(|i| {
-                let mut row: Vec<(&'static str, CypherValue)> = Vec::with_capacity(2);
-                if want_id {
-                    row.push(("nodeId", CypherValue::Integer(i as i64)));
-                }
-                if want_emb {
-                    let start = i * dim;
-                    let slice = &values_ref[start..start + dim];
-                    let v: Vec<CypherValue> = slice
-                        .iter()
-                        .map(|x| CypherValue::Float(*x as f64))
-                        .collect();
-                    row.push(("embedding", CypherValue::List(v)));
-                }
-                row
-            })
-            .collect()
+        rows_of(&self.valid, |i, &valid| {
+            if !valid {
+                return None;
+            }
+            let mut row: StreamRow = Vec::with_capacity(2);
+            if want_id {
+                row.push((Cow::Borrowed("nodeId"), CypherValue::Integer(i as i64)));
+            }
+            if want_emb {
+                let start = i * dim;
+                let slice = &values_ref[start..start + dim];
+                let v: Vec<CypherValue> = slice
+                    .iter()
+                    .map(|x| CypherValue::Float(*x as f64))
+                    .collect();
+                row.push((Cow::Borrowed("embedding"), CypherValue::List(v)));
+            }
+            Some(row)
+        })
     }
 
     fn stats(&self) -> BTreeMap<String, CypherValue> {
@@ -553,14 +570,12 @@ impl AlgorithmResult for PathResult {
         ]
     }
 
-    fn stream_rows(&self) -> Vec<Vec<(&'static str, CypherValue)>> {
+    fn stream_rows(&self) -> Vec<StreamRow> {
         self.stream_rows_filtered(None)
     }
 
-    fn stream_rows_filtered(&self, wanted: ColumnFilter) -> Vec<Vec<(&'static str, CypherValue)>> {
-        // skip the heavy list columns YIELD doesn't want (they dominate stream time); paths built
-        // in parallel
-        use rayon::prelude::*;
+    fn stream_rows_filtered(&self, wanted: ColumnFilter) -> Vec<StreamRow> {
+        // skip the heavy list columns YIELD doesn't want (they dominate stream time)
         let want = |c: &'static str| wanted.is_none_or(|w| w.contains(&c));
         let w_src = want("sourceNodeId");
         let w_tgt = want("targetNodeId");
@@ -568,50 +583,53 @@ impl AlgorithmResult for PathResult {
         let w_nodes = want("nodeIds");
         let w_edges = want("edgeIds");
         let w_costs = want("costs");
-        self.paths
-            .par_iter()
-            .map(|p| {
-                let mut row: Vec<(&'static str, CypherValue)> = Vec::with_capacity(6);
-                if w_src {
-                    row.push(("sourceNodeId", CypherValue::Integer(p.source.0 as i64)));
-                }
-                if w_tgt {
-                    row.push(("targetNodeId", CypherValue::Integer(p.target.0 as i64)));
-                }
-                if w_cost {
-                    row.push(("totalCost", CypherValue::Float(p.total_cost)));
-                }
-                if w_nodes {
-                    row.push((
-                        "nodeIds",
-                        CypherValue::List(
-                            p.node_ids
-                                .iter()
-                                .map(|n| CypherValue::Integer(n.0 as i64))
-                                .collect(),
-                        ),
-                    ));
-                }
-                if w_edges {
-                    row.push((
-                        "edgeIds",
-                        CypherValue::List(
-                            p.edge_ids
-                                .iter()
-                                .map(|e| CypherValue::Integer(e.0 as i64))
-                                .collect(),
-                        ),
-                    ));
-                }
-                if w_costs {
-                    row.push((
-                        "costs",
-                        CypherValue::List(p.costs.iter().map(|c| CypherValue::Float(*c)).collect()),
-                    ));
-                }
-                row
-            })
-            .collect()
+        rows_of(&self.paths, |_, p| {
+            let mut row: StreamRow = Vec::with_capacity(6);
+            if w_src {
+                row.push((
+                    Cow::Borrowed("sourceNodeId"),
+                    CypherValue::Integer(p.source.0 as i64),
+                ));
+            }
+            if w_tgt {
+                row.push((
+                    Cow::Borrowed("targetNodeId"),
+                    CypherValue::Integer(p.target.0 as i64),
+                ));
+            }
+            if w_cost {
+                row.push((Cow::Borrowed("totalCost"), CypherValue::Float(p.total_cost)));
+            }
+            if w_nodes {
+                row.push((
+                    Cow::Borrowed("nodeIds"),
+                    CypherValue::List(
+                        p.node_ids
+                            .iter()
+                            .map(|n| CypherValue::Integer(n.0 as i64))
+                            .collect(),
+                    ),
+                ));
+            }
+            if w_edges {
+                row.push((
+                    Cow::Borrowed("edgeIds"),
+                    CypherValue::List(
+                        p.edge_ids
+                            .iter()
+                            .map(|e| CypherValue::Integer(e.0 as i64))
+                            .collect(),
+                    ),
+                ));
+            }
+            if w_costs {
+                row.push((
+                    Cow::Borrowed("costs"),
+                    CypherValue::List(p.costs.iter().map(|c| CypherValue::Float(*c)).collect()),
+                ));
+            }
+            Some(row)
+        })
     }
 
     fn stats(&self) -> BTreeMap<String, CypherValue> {
@@ -650,18 +668,20 @@ impl AlgorithmResult for NodePairResult {
         &["sourceNodeId", "targetNodeId", "score"]
     }
 
-    fn stream_rows(&self) -> Vec<Vec<(&'static str, CypherValue)>> {
-        use rayon::prelude::*;
-        self.pairs
-            .par_iter()
-            .map(|p| {
-                vec![
-                    ("sourceNodeId", CypherValue::Integer(p.node1.0 as i64)),
-                    ("targetNodeId", CypherValue::Integer(p.node2.0 as i64)),
-                    ("score", CypherValue::Float(p.similarity)),
-                ]
-            })
-            .collect()
+    fn stream_rows(&self) -> Vec<StreamRow> {
+        rows_of(&self.pairs, |_, p| {
+            Some(vec![
+                (
+                    Cow::Borrowed("sourceNodeId"),
+                    CypherValue::Integer(p.node1.0 as i64),
+                ),
+                (
+                    Cow::Borrowed("targetNodeId"),
+                    CypherValue::Integer(p.node2.0 as i64),
+                ),
+                (Cow::Borrowed("score"), CypherValue::Float(p.similarity)),
+            ])
+        })
     }
 
     fn stats(&self) -> BTreeMap<String, CypherValue> {
@@ -695,18 +715,18 @@ impl AlgorithmResult for EntitySetResult {
         &["kind", "id"]
     }
 
-    fn stream_rows(&self) -> Vec<Vec<(&'static str, CypherValue)>> {
+    fn stream_rows(&self) -> Vec<StreamRow> {
         let mut rows = Vec::with_capacity(self.nodes.len() + self.edges.len());
         for n in &self.nodes {
             rows.push(vec![
-                ("kind", CypherValue::String("node".into())),
-                ("id", CypherValue::Integer(n.0 as i64)),
+                (Cow::Borrowed("kind"), CypherValue::String("node".into())),
+                (Cow::Borrowed("id"), CypherValue::Integer(n.0 as i64)),
             ]);
         }
         for e in &self.edges {
             rows.push(vec![
-                ("kind", CypherValue::String("edge".into())),
-                ("id", CypherValue::Integer(e.0 as i64)),
+                (Cow::Borrowed("kind"), CypherValue::String("edge".into())),
+                (Cow::Borrowed("id"), CypherValue::Integer(e.0 as i64)),
             ]);
         }
         rows
@@ -741,7 +761,7 @@ impl AlgorithmResult for StatsResult {
         &[]
     }
 
-    fn stream_rows(&self) -> Vec<Vec<(&'static str, CypherValue)>> {
+    fn stream_rows(&self) -> Vec<StreamRow> {
         // one row mirroring the stats keys; arbitrary keys can't be `&'static str`, so the adapter
         // special-cases StatsOnly outputs
         Vec::new()

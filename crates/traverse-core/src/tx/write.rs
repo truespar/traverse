@@ -133,6 +133,9 @@ pub struct WriteTx<'a> {
     /// Created here: no image needed, abort deletes them.
     created_nodes: FxHashSet<NodeId>,
     created_edges: FxHashSet<EdgeId>,
+    /// Id ranges of bulk creations (`[start, end)`), kept apart from the sets.
+    created_node_ranges: Vec<(u64, u64)>,
+    created_edge_ranges: Vec<(u64, u64)>,
     /// Existing objects imaged here (first touch done).
     touched_nodes: FxHashSet<NodeId>,
     touched_edges: FxHashSet<EdgeId>,
@@ -216,6 +219,8 @@ impl<'a> WriteTx<'a> {
             commit_info: Box::new(CommitInfo::new_uncommitted()),
             created_nodes: FxHashSet::default(),
             created_edges: FxHashSet::default(),
+            created_node_ranges: Vec::new(),
+            created_edge_ranges: Vec::new(),
             touched_nodes: FxHashSet::default(),
             touched_edges: FxHashSet::default(),
             schema_undo: Vec::new(),
@@ -292,7 +297,7 @@ impl<'a> WriteTx<'a> {
     /// memberships as ghosts. Caller holds the structural write lock.
     fn touch_node(&mut self, id: NodeId) -> Result<()> {
         self.mutations += 1;
-        if self.created_nodes.contains(&id) || self.touched_nodes.contains(&id) {
+        if self.owns_node(id) || self.touched_nodes.contains(&id) {
             return Ok(());
         }
         let ci = self.ci();
@@ -313,7 +318,7 @@ impl<'a> WriteTx<'a> {
     /// Edge counterpart of [`Self::touch_node`].
     fn touch_edge(&mut self, id: EdgeId) -> Result<()> {
         self.mutations += 1;
-        if self.created_edges.contains(&id) || self.touched_edges.contains(&id) {
+        if self.owns_edge(id) || self.touched_edges.contains(&id) {
             return Ok(());
         }
         let ci = self.ci();
@@ -374,6 +379,78 @@ impl<'a> WriteTx<'a> {
         let ci = self.ci();
         self.created_edges.insert(id);
         self.graph_mut().versions_mut().edge_runs.push(id.0, ci);
+    }
+
+    fn owns_node(&self, id: NodeId) -> bool {
+        self.created_nodes.contains(&id)
+            || self
+                .created_node_ranges
+                .iter()
+                .any(|&(a, b)| (a..b).contains(&id.0))
+    }
+
+    fn owns_edge(&self, id: EdgeId) -> bool {
+        self.created_edges.contains(&id)
+            || self
+                .created_edge_ranges
+                .iter()
+                .any(|&(a, b)| (a..b).contains(&id.0))
+    }
+
+    /// Bulk node creation ([`Graph::bulk_nodes`]), for a load outside the redo log.
+    pub(crate) fn bulk_nodes(
+        &mut self,
+        labels: &[&str],
+        props: Vec<PropertyMap>,
+    ) -> Result<NodeId> {
+        debug_assert!(
+            self.skip_redo,
+            "bulk creation is for loads outside the redo log"
+        );
+        if let Some(p) = props.first() {
+            self.check_memory_budget(labels, p)?;
+        }
+        let n = props.len();
+        let _rw = self.store.graph_rw.write();
+        let first = self.graph_mut().bulk_nodes(labels, props);
+        self.mutations += n as u64;
+        let ci = self.ci();
+        self.created_node_ranges.push((first.0, first.0 + n as u64));
+        self.graph_mut()
+            .versions_mut()
+            .node_runs
+            .push_range(first.0, first.0 + n as u64, ci);
+        Ok(first)
+    }
+
+    /// Bulk edge creation ([`Graph::bulk_edges`]), for a load outside the redo log.
+    pub(crate) fn bulk_edges(
+        &mut self,
+        edge_type: &str,
+        pairs: &[(NodeId, NodeId)],
+    ) -> Result<EdgeId> {
+        debug_assert!(
+            self.skip_redo,
+            "bulk creation is for loads outside the redo log"
+        );
+        self.check_edge_memory_budget(&PropertyMap::new())?;
+        let n = pairs.len();
+        let _rw = self.store.graph_rw.write();
+        let first = self.graph_mut().bulk_edges(edge_type, pairs)?;
+        self.mutations += n as u64;
+        let ci = self.ci();
+        self.created_edge_ranges.push((first.0, first.0 + n as u64));
+        self.graph_mut()
+            .versions_mut()
+            .edge_runs
+            .push_range(first.0, first.0 + n as u64, ci);
+        Ok(first)
+    }
+
+    /// See [`Graph::set_bulk`].
+    pub(crate) fn set_bulk(&mut self, on: bool) {
+        let _rw = self.store.graph_rw.write();
+        self.graph_mut().set_bulk(on);
     }
 
     fn check_memory_budget(&self, labels: &[&str], props: &PropertyMap) -> Result<()> {
@@ -552,11 +629,22 @@ impl<'a> WriteTx<'a> {
     /// commit before it.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn commit_snapshotted(mut self) -> HybridTimestamp {
+        self.set_bulk(false);
         debug_assert!(self.skip_redo && self.redo_log.is_empty());
         let commit_ts = self.store.clock.now();
         let encoded = encode_ts(commit_ts);
         self.publish(encoded);
         self.store.note_durable(encoded);
+        // durable, and so visible, only now (the collect in `publish` ran before): let go of our
+        // versions, as `commit` does once its log record is synced. Otherwise the load's created
+        // runs stay until the next commit, and every reader until then takes the versioned paths
+        self.store.collect_locked(false);
+        // the load wrote its relationships into the adjacency overlays: packed, reads take the
+        // packed path and a snapshot copies no overlay (a graph under 1024 nodes would otherwise
+        // never fold, see `compact_adjacency`)
+        let _rw = self.store.graph_rw.write();
+        // SAFETY: we hold the writer lock and the structural write lock, as `MvccStore::gc`
+        unsafe { self.store.graph_mut() }.pack_adjacency();
         commit_ts
     }
 
@@ -641,6 +729,8 @@ impl<'a> WriteTx<'a> {
     fn reset_local_state(&mut self) {
         self.created_nodes.clear();
         self.created_edges.clear();
+        self.created_node_ranges.clear();
+        self.created_edge_ranges.clear();
         self.touched_nodes.clear();
         self.touched_edges.clear();
         self.schema_undo.clear();
@@ -661,6 +751,7 @@ impl<'a> WriteTx<'a> {
         let _rw = self.store.graph_rw.write();
         // SAFETY: writer mutex + structural write lock
         let g = unsafe { self.store.graph_mut() };
+        g.set_bulk(false);
 
         for &e in &self.created_edges {
             if g.has_edge(e) {
@@ -670,6 +761,22 @@ impl<'a> WriteTx<'a> {
         for &n in &self.created_nodes {
             if g.get_node(n).is_ok() {
                 let _ = g.delete_node_cascading(n);
+            }
+        }
+        for &(a, b) in &self.created_edge_ranges {
+            for e in a..b {
+                let e = EdgeId(e);
+                if g.has_edge(e) {
+                    let _ = g.delete_edge(e);
+                }
+            }
+        }
+        for &(a, b) in &self.created_node_ranges {
+            for n in a..b {
+                let n = NodeId(n);
+                if g.get_node(n).is_ok() {
+                    let _ = g.delete_node_cascading(n);
+                }
             }
         }
         // nodes first: restored edges need their endpoints
@@ -1016,7 +1123,7 @@ impl GraphView for WriteTx<'_> {
 
     fn delete_node(&mut self, id: NodeId) -> Result<()> {
         let _rw = self.store.graph_rw.write();
-        if self.created_nodes.contains(&id) {
+        if self.owns_node(id) {
             self.graph_mut().delete_node(id)?;
         } else {
             self.touch_node(id)?;
@@ -1040,7 +1147,7 @@ impl GraphView for WriteTx<'_> {
 
     fn delete_edge(&mut self, id: EdgeId) -> Result<()> {
         let _rw = self.store.graph_rw.write();
-        if self.created_edges.contains(&id) {
+        if self.owns_edge(id) {
             self.graph_mut().delete_edge(id)?;
         } else {
             let (source, target) = {

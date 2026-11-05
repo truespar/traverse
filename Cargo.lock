@@ -7740,7 +7740,7 @@ dependencies = [
 
 [[package]]
 name = "traverse-admin"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "clap",
  "csv",
@@ -7751,7 +7751,7 @@ dependencies = [
 
 [[package]]
 name = "traverse-bench"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "clap",
  "flate2",
@@ -7767,7 +7767,7 @@ dependencies = [
 
 [[package]]
 name = "traverse-cli"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "clap",
  "comfy-table",
@@ -7786,7 +7786,7 @@ dependencies = [
 
 [[package]]
 name = "traverse-codec"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "crc32fast",
  "postcard",
@@ -7795,7 +7795,7 @@ dependencies = [
 
 [[package]]
 name = "traverse-core"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "crc32fast",
  "criterion",
@@ -7817,7 +7817,7 @@ dependencies = [
 
 [[package]]
 name = "traverse-cypher"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "arrow-array",
  "arrow-ipc",
@@ -7858,7 +7858,7 @@ dependencies = [
 
 [[package]]
 name = "traverse-ffi"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "mimalloc",
  "tempfile",
@@ -7869,7 +7869,7 @@ dependencies = [
 
 [[package]]
 name = "traverse-gql"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "criterion",
  "gherkin",
@@ -7882,7 +7882,7 @@ dependencies = [
 
 [[package]]
 name = "traverse-java"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "jni",
  "mimalloc",
@@ -7893,7 +7893,7 @@ dependencies = [
 
 [[package]]
 name = "traverse-ml"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "burn",
  "cudarc",
@@ -7910,7 +7910,7 @@ dependencies = [
 
 [[package]]
 name = "traverse-ml-wasm"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "burn",
  "console_error_panic_hook",
@@ -7928,7 +7928,7 @@ dependencies = [
 
 [[package]]
 name = "traverse-node"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "base64 0.23.1",
  "mimalloc",
@@ -7943,10 +7943,12 @@ dependencies = [
 
 [[package]]
 name = "traverse-python"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
+ "csv",
  "mimalloc",
  "pyo3",
+ "rayon",
  "traverse-core",
  "traverse-cypher",
  "traverse-gql",
@@ -7954,7 +7956,7 @@ dependencies = [
 
 [[package]]
 name = "traverse-server"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -8001,7 +8003,7 @@ dependencies = [
 
 [[package]]
 name = "traverse-wasm"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "console_error_panic_hook",
  "getrandom 0.2.17",

@@ -318,14 +318,15 @@ fn gds_procedure_inside_call_subquery_union() {
          RETURN max(totalCost) AS totalCost",
     );
     assert_eq!(rows2[0][0], CypherValue::Float(-1.0));
-    // write-mode procedures still refuse clearly
-    let e = run(
+    // write-mode procedures run inside the subquery too
+    let rows = ok(
         &mut g,
         "CALL { MATCH (x:V) CALL gds.pageRank.write('subq', {writeProperty: 'pr'}) \
          YIELD nodePropertiesWritten RETURN nodePropertiesWritten } RETURN 1",
-    )
-    .unwrap_err();
-    assert!(e.contains("not yet supported"), "got: {e}");
+    );
+    assert_eq!(rows.len(), 2);
+    let written = ok(&mut g, "MATCH (v:V) WHERE v.pr IS NOT NULL RETURN count(v)");
+    assert_eq!(written[0][0], CypherValue::Integer(2));
     ok(&mut g, "CALL gds.graph.drop('subq')");
 }
 
@@ -406,11 +407,17 @@ fn order_by_float_property_batched() {
     for w in vals.windows(2) {
         assert!(w[0] >= w[1], "non-monotonic: {} < {}", w[0], w[1]);
     }
-    // mixed int+float+null keys order correctly (nulls last DESC)
+    // mixed int+float+null keys order correctly: null sorts last ascending, so first descending
     ok(&mut g, "CREATE (:F {id: 1000}), (:F {id: 1001, score: 3})");
     let tail = ok(
         &mut g,
         "MATCH (f:F) RETURN f.score ORDER BY f.score DESC LIMIT 502",
     );
-    assert_eq!(tail[501][0], CypherValue::Null);
+    assert_eq!(tail[0][0], CypherValue::Null);
+    assert_eq!(tail[501][0], CypherValue::Float(0.0));
+    let asc = ok(
+        &mut g,
+        "MATCH (f:F) RETURN f.score ORDER BY f.score LIMIT 502",
+    );
+    assert_eq!(asc[501][0], CypherValue::Null);
 }

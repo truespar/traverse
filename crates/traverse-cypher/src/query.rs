@@ -13,7 +13,7 @@
 //! a relaxed atomic load, plus a clock read when there's a deadline. Algorithm kernels hold the
 //! context in their cancellation token.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
@@ -322,12 +322,6 @@ impl QueryContext {
     /// was current before.
     #[must_use = "the query stops being current when this value is dropped"]
     pub fn enter(self: &Arc<Self>) -> QueryScope {
-        // per-thread caches keyed by plan addresses belong to one query: a thread taking on another
-        // query's work (a pooled worker, a resumed stream) starts them over
-        if CACHE_OWNER.get() != self.root {
-            crate::executor::reset_pointer_caches();
-            CACHE_OWNER.set(self.root);
-        }
         let previous = CURRENT.with(|c| c.borrow_mut().replace(Arc::clone(self)));
         QueryScope {
             restore: Some(previous),
@@ -360,8 +354,6 @@ fn format_duration(d: Duration) -> String {
 
 thread_local! {
     static CURRENT: RefCell<Option<Arc<QueryContext>>> = const { RefCell::new(None) };
-    /// Root id of the query whose pointer-keyed caches this thread holds (0 = none).
-    static CACHE_OWNER: Cell<u64> = const { Cell::new(0) };
 }
 
 /// The query entered on this thread, if any.

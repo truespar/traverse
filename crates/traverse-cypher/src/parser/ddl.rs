@@ -10,7 +10,7 @@ use super::Parser;
 impl Parser {
     /// DDL object name: a symbolic name or a `$parameter` (Cypher 25 dynamic DDL
     /// names). Parameters become a marker `\u{1}param\u{1}<name>` resolved at
-    /// execution (`operators::schema::resolve_ddl_name`), since DDL plans before
+    /// execution (`vex::ops::schema::resolve_ddl_name`), since DDL plans before
     /// parameter values are looked at.
     fn parse_ddl_name(&mut self) -> Result<String, CypherError> {
         if let TokenKind::Parameter(pname) = self.peek().clone() {

@@ -48,6 +48,25 @@ impl PropertyIndex {
         self.tree.entry(key).or_default().push(node_id);
     }
 
+    /// Adds entries sorted by key (ids in order within a key); an empty index is built in one
+    /// pass from them.
+    pub fn extend_sorted(&mut self, entries: Vec<(IndexKey, NodeId)>) {
+        if !self.tree.is_empty() {
+            for (key, id) in entries {
+                self.insert(key, id);
+            }
+            return;
+        }
+        let mut grouped: Vec<(IndexKey, SmallVec<[NodeId; 1]>)> = Vec::new();
+        for (key, id) in entries {
+            match grouped.last_mut() {
+                Some((last, ids)) if *last == key => ids.push(id),
+                _ => grouped.push((key, SmallVec::from_elem(id, 1))),
+            }
+        }
+        self.tree = grouped.into_iter().collect();
+    }
+
     /// Removes `node_id` from `key`'s entry.
     pub fn remove(&mut self, key: &IndexKey, node_id: NodeId) {
         if let Some(ids) = self.tree.get_mut(key) {
@@ -85,7 +104,53 @@ impl PropertyIndex {
             .flat_map(|(_, ids)| ids.iter().copied())
             .collect()
     }
+
+    /// Entries in a key range, without collecting them.
+    pub fn range_count(&self, lower: Bound<&IndexKey>, upper: Bound<&IndexKey>) -> usize {
+        self.tree
+            .range((lower, upper))
+            .map(|(_, ids)| ids.len())
+            .sum()
+    }
+
+    /// Entries under exactly `key`.
+    pub fn lookup_count(&self, key: &IndexKey) -> usize {
+        self.tree.get(key).map_or(0, |ids| ids.len())
+    }
+
+    /// The share of the index a key range covers, from the key extremes under a uniform
+    /// assumption; `None` for an index with few keys (count it instead), an empty one, or
+    /// non-numeric keys. Costs two tree lookups.
+    pub fn range_estimate(&self, lower: Bound<&IndexKey>, upper: Bound<&IndexKey>) -> Option<f64> {
+        // few distinct keys: counting the range is as cheap and exact; the uniform assumption
+        // only earns its keep over many keys, where a count would walk them all
+        if self.tree.len() < ESTIMATE_MIN_KEYS {
+            return None;
+        }
+        let num = |k: &IndexKey| match k {
+            IndexKey::Int(i) => Some(*i as f64),
+            IndexKey::Float(f) => Some(*f),
+            _ => None,
+        };
+        let lo = num(self.tree.keys().next()?)?;
+        let hi = num(self.tree.keys().next_back()?)?;
+        if hi <= lo {
+            return Some(1.0);
+        }
+        let from = match lower {
+            Bound::Unbounded => lo,
+            Bound::Included(k) | Bound::Excluded(k) => num(k)?.max(lo),
+        };
+        let to = match upper {
+            Bound::Unbounded => hi,
+            Bound::Included(k) | Bound::Excluded(k) => num(k)?.min(hi),
+        };
+        Some(((to - from) / (hi - lo)).clamp(0.0, 1.0))
+    }
 }
+
+/// Distinct keys from which a range's share is estimated rather than counted.
+const ESTIMATE_MIN_KEYS: usize = 4096;
 
 /// Node-index metadata without the trees: what planners and SHOW INDEXES read. Replaced (never
 /// mutated) on create/drop, so a reader's `Arc` stays valid and stable.

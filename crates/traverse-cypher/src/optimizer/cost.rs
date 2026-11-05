@@ -215,9 +215,6 @@ pub fn estimate_cost(plan: &LogicalPlan, graph: &dyn GraphView) -> (f64, f64) {
             (input_card, input_cost + input_card * body_cost)
         }
 
-        // runtime-only leaf, never actually costed
-        LogicalPlan::SeededRows(frames) => (frames.len() as f64, 0.0),
-
         LogicalPlan::CreateIndex { .. }
         | LogicalPlan::CreateVectorIndex { .. }
         | LogicalPlan::CreateFulltextIndex { .. }

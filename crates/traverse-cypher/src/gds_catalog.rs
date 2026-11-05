@@ -245,7 +245,9 @@ pub fn algo_mapping(
             &["index", "route", "isNegativeCycle"],
         ),
         "allShortestPaths" => ("allShortestPaths", &[("totalCost", "distance")], &[]),
-        "allShortestPaths.delta" => (
+        // single-source shortest paths: delta-stepping answers like Dijkstra for the non-negative
+        // weights GDS requires
+        "allShortestPaths.delta" | "allShortestPaths.dijkstra" => (
             "deltaStepping",
             &[
                 ("sourceNodeId", "sourceNode"),
@@ -300,11 +302,18 @@ pub fn merge_projection_into_config(
             ),
         );
     }
-    if let Some(w) = &proj.rel_weight_property {
+    // an UNDIRECTED projection reads its relationships both ways on the live graph too
+    if proj
+        .materialized
+        .as_ref()
+        .is_some_and(|m| crate::algorithms::projection::AlgorithmGraph::is_undirected(&**m))
+    {
         config
-            .entry("relationshipWeightProperty".to_string())
-            .or_insert_with(|| CypherValue::String(w.clone()));
+            .entry("orientation".to_string())
+            .or_insert_with(|| CypherValue::String("UNDIRECTED".to_string()));
     }
+    // no relationshipWeightProperty from the projection: GDS weighs an algorithm only when its
+    // own configuration names the property
 }
 
 /// `gds.util.*` / `gds.similarity.*` FUNCTIONS (names arrive lowercased); None outside the subset.
@@ -333,7 +342,10 @@ pub(crate) fn eval_fn(
             V::NodeRef(id) => *id,
             _ => return V::Null,
         };
-        if graph.get_node(id).is_ok() {
+        // an existence check, not `get_node`: that copies the node and its properties each row
+        let mut exists = Vec::with_capacity(1);
+        graph.nodes_exist(&[id], &mut exists);
+        if exists.first() == Some(&true) {
             V::NodeRef(id)
         } else {
             V::Null

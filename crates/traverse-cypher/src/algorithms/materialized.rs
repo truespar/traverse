@@ -19,7 +19,7 @@ use rustc_hash::FxHashMap;
 use traverse_core::graph::types::NodeId;
 use traverse_core::tx::view::GraphView;
 
-use super::projection::AlgorithmGraph;
+use super::projection::{AlgorithmGraph, DenseAdjacency};
 use crate::error::CypherError;
 
 /// Compact CSR snapshot of a projected subgraph.
@@ -150,6 +150,35 @@ impl MaterializedGraph {
             + self.in_weights.as_ref().map_or(0, |w| w.len() * 8)
     }
 
+    /// Whether the snapshot carries relationship weights (a projected property, or the `weight`
+    /// column of a Cypher projection).
+    pub fn has_weights(&self) -> bool {
+        self.out_weights.is_some()
+    }
+
+    /// The natural out- and in-lists as dense CSR arrays.
+    fn dense_lists(&self) -> (DenseAdjacency<'_>, DenseAdjacency<'_>) {
+        (
+            DenseAdjacency {
+                offsets: &self.out_offsets,
+                targets: &self.out_targets,
+            },
+            DenseAdjacency {
+                offsets: &self.in_offsets,
+                targets: &self.in_targets,
+            },
+        )
+    }
+
+    /// `f` per relationship ending at dense node `i`, as stored.
+    fn for_each_natural_in(&self, i: usize, f: &mut dyn FnMut(NodeId, u64, f64)) {
+        let (a, b) = (self.in_offsets[i] as usize, self.in_offsets[i + 1] as usize);
+        for k in a..b {
+            let w = self.in_weights.as_ref().map_or(1.0, |ws| ws[k]);
+            f(NodeId(self.in_targets[k] as u64), self.in_edge_ids[k], w);
+        }
+    }
+
     /// Snapshot of the live graph under the filters. Empty `labels` / `types` = all. `weight_prop`
     /// bakes per-edge weights (missing -> 1.0). `undirected` is GDS's UNDIRECTED orientation (see
     /// the CSR note below).
@@ -242,16 +271,12 @@ impl MaterializedGraph {
             (offsets, targets, edge_ids, weights)
         };
 
-        // adjacency exactly as the live graph presents it (natural out + natural in). Engines
-        // wanting undirected neighborhoods union both sides, as on the live path; mirroring edges
-        // here would double their degrees (kCore would report 4 instead of 2). UNDIRECTED is
-        // honored by GDS-side validation only; `is_undirected()` stays false so engines behave as
-        // on the live path
+        // natural out + natural in, as the live graph presents them; an UNDIRECTED projection
+        // reads both as each node's out (and in) neighbors, see `is_undirected`
         let (out_offsets, out_targets, out_edge_ids, out_w) = build_csr(&edges, n);
         let in_pairs: Vec<(u32, u32, u64, f64)> =
             edges.iter().map(|&(s, d, eid, w)| (d, s, eid, w)).collect();
         let (in_offsets, in_targets, in_edge_ids, in_w) = build_csr(&in_pairs, n);
-        let _ = undirected;
 
         let weighted = weight_prop.is_some();
         Ok(Self {
@@ -266,7 +291,7 @@ impl MaterializedGraph {
             in_edge_ids,
             in_weights: weighted.then_some(in_w),
             edge_count,
-            undirected: false,
+            undirected,
             overlays: std::sync::RwLock::new(Default::default()),
             empty: traverse_core::graph::Graph::new(),
         })
@@ -297,13 +322,21 @@ impl AlgorithmGraph for MaterializedGraph {
         if i >= self.orig_ids.len() {
             return 0;
         }
-        self.out_offsets[i + 1] - self.out_offsets[i]
+        let out = self.out_offsets[i + 1] - self.out_offsets[i];
+        if self.undirected {
+            out + self.in_offsets[i + 1] - self.in_offsets[i]
+        } else {
+            out
+        }
     }
 
     fn in_degree(&self, node: NodeId) -> u32 {
         let i = node.0 as usize;
         if i >= self.orig_ids.len() {
             return 0;
+        }
+        if self.undirected {
+            return self.out_degree(node);
         }
         self.in_offsets[i + 1] - self.in_offsets[i]
     }
@@ -321,6 +354,9 @@ impl AlgorithmGraph for MaterializedGraph {
             let w = self.out_weights.as_ref().map_or(1.0, |ws| ws[k]);
             f(NodeId(self.out_targets[k] as u64), self.out_edge_ids[k], w);
         }
+        if self.undirected {
+            self.for_each_natural_in(i, f);
+        }
     }
 
     fn for_each_in(&self, node: NodeId, f: &mut dyn FnMut(NodeId, u64, f64)) {
@@ -328,17 +364,35 @@ impl AlgorithmGraph for MaterializedGraph {
         if i >= self.orig_ids.len() {
             return;
         }
-        let (a, b) = (self.in_offsets[i] as usize, self.in_offsets[i + 1] as usize);
-        for k in a..b {
-            let w = self.in_weights.as_ref().map_or(1.0, |ws| ws[k]);
-            f(NodeId(self.in_targets[k] as u64), self.in_edge_ids[k], w);
+        if self.undirected {
+            return self.for_each_out(node, f);
         }
+        self.for_each_natural_in(i, f);
+    }
+
+    fn in_adjacency(&self) -> Option<(DenseAdjacency<'_>, Option<DenseAdjacency<'_>>)> {
+        let (out, natural_in) = self.dense_lists();
+        // as `for_each_in`: undirected, the out-list, then the natural in-list
+        Some(if self.undirected {
+            (out, Some(natural_in))
+        } else {
+            (natural_in, None)
+        })
+    }
+
+    fn out_adjacency(&self) -> Option<(DenseAdjacency<'_>, Option<DenseAdjacency<'_>>)> {
+        let (out, natural_in) = self.dense_lists();
+        // as `for_each_out`
+        Some((out, self.undirected.then_some(natural_in)))
     }
 
     fn is_unit_weighted(&self) -> bool {
         self.out_weights.is_none()
     }
 
+    /// GDS's UNDIRECTED orientation: each relationship lists at both ends, as an out and an in
+    /// neighbor, so a node's neighbors are its natural out- and in-neighbors (a self-loop twice:
+    /// GDS's degree counts it 2), and engines that union both directions read out alone.
     fn is_undirected(&self) -> bool {
         self.undirected
     }
@@ -363,5 +417,78 @@ impl AlgorithmGraph for MaterializedGraph {
             .get(key)
             .and_then(|vals| vals.get(node.0 as usize))
             .and_then(|v| v.to_property())
+    }
+}
+
+/// A projection read with every relationship weighing 1.0. GDS algorithms run unweighted unless
+/// their own configuration names `relationshipWeightProperty`, whatever weights the projection
+/// holds.
+pub(crate) struct Unweighted<'a>(pub(crate) &'a dyn AlgorithmGraph);
+
+impl AlgorithmGraph for Unweighted<'_> {
+    fn node_count(&self) -> usize {
+        self.0.node_count()
+    }
+
+    fn edge_count(&self) -> usize {
+        self.0.edge_count()
+    }
+
+    fn highest_node_id(&self) -> u64 {
+        self.0.highest_node_id()
+    }
+
+    fn is_active(&self, node: NodeId) -> bool {
+        self.0.is_active(node)
+    }
+
+    fn out_degree(&self, node: NodeId) -> u32 {
+        self.0.out_degree(node)
+    }
+
+    fn in_degree(&self, node: NodeId) -> u32 {
+        self.0.in_degree(node)
+    }
+
+    fn for_each_out(&self, node: NodeId, f: &mut dyn FnMut(NodeId, u64, f64)) {
+        self.0.for_each_out(node, &mut |v, e, _| f(v, e, 1.0));
+    }
+
+    fn for_each_in(&self, node: NodeId, f: &mut dyn FnMut(NodeId, u64, f64)) {
+        self.0.for_each_in(node, &mut |v, e, _| f(v, e, 1.0));
+    }
+
+    // no adjacency slices: their entries carry the weights; neighbor ids alone carry none
+
+    fn in_adjacency(&self) -> Option<(DenseAdjacency<'_>, Option<DenseAdjacency<'_>>)> {
+        self.0.in_adjacency()
+    }
+
+    fn out_adjacency(&self) -> Option<(DenseAdjacency<'_>, Option<DenseAdjacency<'_>>)> {
+        self.0.out_adjacency()
+    }
+
+    fn is_unit_weighted(&self) -> bool {
+        true
+    }
+
+    fn is_undirected(&self) -> bool {
+        self.0.is_undirected()
+    }
+
+    fn active_nodes(&self) -> Vec<NodeId> {
+        self.0.active_nodes()
+    }
+
+    fn graph(&self) -> &dyn GraphView {
+        self.0.graph()
+    }
+
+    fn node_property(
+        &self,
+        node: NodeId,
+        key: &str,
+    ) -> Option<traverse_core::graph::property::PropertyValue> {
+        self.0.node_property(node, key)
     }
 }

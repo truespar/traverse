@@ -1,5 +1,5 @@
 use super::property::{PropertyMap, PropertyValue};
-use super::types::Direction;
+use super::types::{Direction, EdgeId, PropertyKeyId};
 use super::*;
 use crate::error::Error;
 use std::collections::BTreeMap;
@@ -684,4 +684,264 @@ fn social_graph_scenario() {
     // String table was populated
     assert!(g.strings().get("Person").is_some());
     assert!(g.strings().get("KNOWS").is_some());
+}
+
+/// The gathers of `ids` for `key`, with the missing count.
+fn gather_nodes(
+    g: &Graph,
+    ids: &[NodeId],
+    key: PropertyKeyId,
+) -> (usize, Vec<Option<PropertyValue>>) {
+    let mut out: Vec<Option<PropertyValue>> = Vec::new();
+    let missing = g.gather_node_props(ids, &[key], &mut [&mut out]);
+    (missing, out)
+}
+
+/// What the row store says for `ids` at `key`.
+fn rows_say(g: &Graph, ids: &[NodeId], key: PropertyKeyId) -> Vec<Option<PropertyValue>> {
+    ids.iter()
+        .map(|id| {
+            g.get_node(*id)
+                .ok()
+                .and_then(|n| n.properties.get(key))
+                .filter(|v| *v != PropertyValue::Null)
+        })
+        .collect()
+}
+
+#[test]
+fn typed_columns_follow_node_writes() {
+    use crate::tx::view::GraphView;
+    let mut g = Graph::new();
+    let mut ids = Vec::new();
+    for i in 0..40_000u64 {
+        let mut p = props(&[
+            ("age", PropertyValue::Int(i as i64 % 90)),
+            ("name", PropertyValue::String(format!("u{i}"))),
+        ]);
+        if i % 7 == 0 {
+            // a lane of another type than the column's
+            p.insert("age".into(), PropertyValue::String("n/a".into()));
+        }
+        if i % 11 == 0 {
+            p.remove("age");
+        }
+        ids.push(g.create_node(&["User"], p));
+    }
+    let age = PropertyKeyId(g.strings().get("age").unwrap());
+    let name = PropertyKeyId(g.strings().get("name").unwrap());
+    // a gather this broad builds the columns before it runs
+    for _ in 0..2 {
+        for key in [age, name] {
+            let (m, got) = gather_nodes(&g, &ids, key);
+            assert_eq!(m, 0);
+            assert_eq!(got, rows_say(&g, &ids, key));
+        }
+    }
+    assert!(g.columns.bytes() > 0, "the columns were built");
+
+    // every shape of write: replaced maps, in-place SET / REMOVE through the index bracket,
+    // the full bracket, delete, restore, create
+    g.update_node_properties(ids[1], props(&[("age", PropertyValue::Int(1000))]))
+        .unwrap();
+    g.update_node_properties(
+        ids[2],
+        props(&[
+            ("age", PropertyValue::Float(2.5)),
+            ("name", PropertyValue::String("x".into())),
+        ]),
+    )
+    .unwrap();
+    g.unindex_node_prop(ids[3], "age");
+    g.get_node_mut(ids[3])
+        .unwrap()
+        .properties
+        .insert(age, PropertyValue::Int(-5));
+    g.index_node_prop(ids[3], "age");
+    g.unindex_node_prop(ids[4], "name");
+    g.get_node_mut(ids[4]).unwrap().properties.insert(
+        name,
+        PropertyValue::String("a much longer name than before".into()),
+    );
+    g.index_node_prop(ids[4], "name");
+    g.unindex_node_prop(ids[5], "name");
+    g.get_node_mut(ids[5])
+        .unwrap()
+        .properties
+        .insert(name, PropertyValue::String("s".into()));
+    g.index_node_prop(ids[5], "name");
+    g.unindex_node_prop(ids[6], "age");
+    g.get_node_mut(ids[6]).unwrap().properties.remove(age);
+    g.index_node_prop(ids[6], "age");
+    g.unindex_node(ids[8]);
+    g.get_node_mut(ids[8])
+        .unwrap()
+        .properties
+        .insert(age, PropertyValue::List(vec![PropertyValue::Int(1)]));
+    g.index_node(ids[8]);
+    let gone = g.get_node(ids[9]).unwrap().clone();
+    g.delete_node(ids[9]).unwrap();
+    let (m, got) = gather_nodes(&g, &ids[..12], age);
+    assert_eq!(m, 1);
+    assert_eq!(got[9], None);
+    g.restore_node(gone);
+    ids.push(g.create_node(&["User"], props(&[("age", PropertyValue::Int(77))])));
+    for key in [age, name] {
+        let (m, got) = gather_nodes(&g, &ids, key);
+        assert_eq!(m, 0);
+        assert_eq!(got, rows_say(&g, &ids, key));
+    }
+    // an id that never existed is missing, a far-out one too
+    let (m, got) = gather_nodes(&g, &[NodeId(1 << 40), NodeId(u64::MAX), ids[0]], age);
+    assert_eq!(m, 2);
+    assert_eq!(got[0], None);
+    assert_eq!(got[2], rows_say(&g, &ids[..1], age)[0]);
+}
+
+#[test]
+fn typed_columns_follow_edge_writes() {
+    use crate::tx::view::GraphView;
+    let mut g = Graph::new();
+    let a = g.create_node(&["N"], empty_props());
+    let b = g.create_node(&["N"], empty_props());
+    let mut ids = Vec::new();
+    for i in 0..40_000u64 {
+        let p = if i % 3 == 0 {
+            empty_props()
+        } else {
+            props(&[("w", PropertyValue::Float(i as f64 / 2.0))])
+        };
+        ids.push(g.create_edge(a, b, "R", p).unwrap());
+    }
+    let w = PropertyKeyId(g.strings().get("w").unwrap());
+    let rows = |g: &Graph, ids: &[EdgeId]| -> Vec<Option<PropertyValue>> {
+        ids.iter()
+            .map(|id| g.get_edge(*id).ok().and_then(|e| e.properties.get(w)))
+            .collect()
+    };
+    let gather = |g: &Graph, ids: &[EdgeId]| -> (usize, Vec<Option<PropertyValue>>) {
+        let mut out: Vec<Option<PropertyValue>> = Vec::new();
+        let missing = g.gather_edge_props(ids, &[w], &mut [&mut out]);
+        (missing, out)
+    };
+    for _ in 0..2 {
+        let (m, got) = gather(&g, &ids);
+        assert_eq!(m, 0);
+        assert_eq!(got, rows(&g, &ids));
+    }
+    assert!(g.columns.bytes() > 0);
+    // a property-less edge gains a property, a propped one loses them, in-place SET, delete
+    g.update_edge_properties(ids[0], props(&[("w", PropertyValue::Float(9.0))]))
+        .unwrap();
+    g.update_edge_properties(ids[1], empty_props()).unwrap();
+    g.unindex_edge_prop(ids[2], "w");
+    g.get_edge_mut(ids[2])
+        .unwrap()
+        .properties
+        .insert(w, PropertyValue::Int(3));
+    g.index_edge_prop(ids[2], "w");
+    g.delete_edge(ids[4]).unwrap();
+    let (m, got) = gather(&g, &ids[..6]);
+    assert_eq!(m, 1);
+    assert_eq!(got, rows(&g, &ids[..6]));
+    assert_eq!(got[4], None);
+    ids.push(
+        g.create_edge(b, a, "R", props(&[("w", PropertyValue::Float(0.5))]))
+            .unwrap(),
+    );
+    let (m, got) = gather(&g, &ids);
+    assert_eq!(m, 1);
+    assert_eq!(got, rows(&g, &ids));
+}
+
+/// What the unlabeled-node count should be.
+fn recount_unlabeled(g: &Graph) -> usize {
+    g.nodes.values().filter(|n| n.labels.is_empty()).count()
+}
+
+/// A label-less `{prop: value}` seek answers from the label indexes only while they cover every
+/// node: no node without a label, an index on the property for every label in use. Nodes with
+/// two indexed labels come once.
+#[test]
+fn property_seek_answers_only_while_the_label_indexes_cover_every_node() {
+    let id = |i: i64| props(&[("id", PropertyValue::Int(i))]);
+    let key = |i: i64| crate::graph::property::IndexKey::Int(i);
+    let mut g = Graph::new();
+    assert!(g.property_seek_covers("id"), "an empty graph is covered");
+    let a = g.create_node(&["A"], id(1));
+    let b = g.create_node(&["B"], id(1));
+    let c = g.create_node(&["A", "B"], id(2));
+    g.create_index("a_id", "A", "id").unwrap();
+    assert!(!g.property_seek_covers("id"), "B has no index on id");
+    assert_eq!(g.property_seek("id", &key(1)), None);
+    g.create_index("b_id", "B", "id").unwrap();
+    assert!(g.property_seek_covers("id"));
+    assert_eq!(g.property_seek("id", &key(1)), Some(vec![a, b]));
+    assert_eq!(g.property_seek("id", &key(2)), Some(vec![c]));
+    assert_eq!(g.property_seek("id", &key(3)), Some(vec![]));
+    assert_eq!(g.property_seek("never_used", &key(1)), Some(vec![]));
+
+    // an unlabeled node breaks the cover, and the count follows every change
+    let u = g.create_node(&[], id(1));
+    assert!(!g.property_seek_covers("id"));
+    assert_eq!(g.property_seek("id", &key(1)), None);
+    g.add_label(u, "A").unwrap();
+    assert_eq!(g.property_seek("id", &key(1)), Some(vec![a, b, u]));
+    g.remove_label(u, "A").unwrap();
+    assert!(!g.property_seek_covers("id"));
+    g.delete_node(u).unwrap();
+    assert!(g.property_seek_covers("id"));
+    let removed = g.get_node(a).unwrap().clone();
+    g.delete_node(a).unwrap();
+    g.restore_node(removed);
+    g.create_node_with_id(c, &[], id(2));
+    assert!(!g.property_seek_covers("id"), "an overwrite to no labels");
+    g.create_node_with_id(c, &["B"], id(2));
+    assert_eq!(recount_unlabeled(&g), g.unlabeled);
+    assert!(g.property_seek_covers("id"));
+
+    // a reload counts afresh
+    let g2 = Graph::from_parts(g.as_parts());
+    assert_eq!(g2.unlabeled, recount_unlabeled(&g2));
+    assert!(g2.property_seek_covers("id"));
+}
+
+/// Aborted transactions put the count back, and a snapshot doesn't seek while versions are
+/// about (the live labels and index entries may not be the snapshot's).
+#[test]
+fn property_seek_through_transactions() {
+    use crate::tx::MvccStore;
+    use crate::tx::view::GraphView;
+    let id = |i: i64| props(&[("id", PropertyValue::Int(i))]);
+    let key = crate::graph::property::IndexKey::Int(1);
+    let mut g = Graph::new();
+    let a = g.create_node(&["A"], id(1));
+    g.create_index("a_id", "A", "id").unwrap();
+    let store = MvccStore::new(g);
+
+    let r = store.begin_read().unwrap();
+    assert_eq!(GraphView::property_seek(&r, "id", &key), Some(vec![a]));
+    drop(r);
+
+    // an open write that takes a's label away: the old snapshot must not seek
+    let r = store.begin_read().unwrap();
+    let mut w = store.begin_write();
+    GraphView::remove_label(&mut w, a, "A").unwrap();
+    assert_eq!(GraphView::property_seek(&r, "id", &key), None);
+    w.abort();
+    drop(r);
+    // SAFETY: no concurrent access in tests
+    let g = unsafe { store.graph() };
+    assert_eq!(g.unlabeled, recount_unlabeled(g));
+    assert!(g.property_seek_covers("id"));
+
+    let mut w = store.begin_write();
+    GraphView::create_node(&mut w, &[], id(1)).unwrap();
+    w.abort();
+    // SAFETY: no concurrent access in tests
+    let g = unsafe { store.graph() };
+    assert_eq!(g.unlabeled, recount_unlabeled(g));
+    store.gc();
+    let r = store.begin_read().unwrap();
+    assert_eq!(GraphView::property_seek(&r, "id", &key), Some(vec![a]));
 }

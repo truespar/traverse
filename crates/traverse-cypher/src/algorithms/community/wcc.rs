@@ -10,7 +10,7 @@
 //!    giant component is then almost complete.
 //! 2. **Find the dominant root**: the largest component's representative.
 //! 3. **Linear sweep**: for each node *not* in the dominant component, union
-//!    with all neighbors. Edges inside the dominant component are skipped
+//!    with all neighbors, in and out. Edges inside the dominant component are skipped
 //!    (`find_compress` gives the same root both ways).
 //! 4. **Final compression**: every node's parent becomes its root.
 //!
@@ -137,33 +137,33 @@ impl GraphAlgorithm for Wcc {
 
         // -- phase 3: LINEAR SWEEP, union the remaining edges of nodes NOT in the dominant
         // component. Most edges of real social graphs already sit inside the dominant tree, so
-        // those nodes skip their adjacency; stragglers walk every edge
+        // those nodes skip their adjacency; stragglers walk every edge, both directions: an edge
+        // from a dominant node to a straggler shows only on the straggler's side (as an in-edge,
+        // or, undirected, at both ends), and the dominant node is skipped
         nodes.par_iter().for_each(|&v| {
             let v_idx = v.0;
             if parent[v_idx as usize].load(Ordering::Acquire) == dominant_root {
                 return;
             }
             if let Some(slice) = graph.outgoing_adj_slice(v) {
-                if is_undirected {
-                    for ep in slice {
-                        let n = ep.neighbor().0;
-                        if v_idx < n {
-                            union_atomic(&parent, v_idx, n);
-                        }
-                    }
-                } else {
-                    for ep in slice {
-                        union_atomic(&parent, v_idx, ep.neighbor().0);
-                    }
+                for ep in slice {
+                    union_atomic(&parent, v_idx, ep.neighbor().0);
                 }
-            } else if is_undirected {
-                graph.for_each_out(v, &mut |u, _eid, _w| {
-                    if v_idx < u.0 {
-                        union_atomic(&parent, v_idx, u.0);
-                    }
-                });
             } else {
                 graph.for_each_out(v, &mut |u, _eid, _w| {
+                    union_atomic(&parent, v_idx, u.0);
+                });
+            }
+            // an undirected projection lists both directions as out already
+            if is_undirected {
+                return;
+            }
+            if let Some(slice) = graph.incoming_adj_slice(v) {
+                for ep in slice {
+                    union_atomic(&parent, v_idx, ep.neighbor().0);
+                }
+            } else {
+                graph.for_each_in(v, &mut |u, _eid, _w| {
                     union_atomic(&parent, v_idx, u.0);
                 });
             }
@@ -269,6 +269,7 @@ pub fn register() {
 mod tests {
     use super::*;
     use crate::algorithms::projection::AlgorithmGraphView;
+    use crate::algorithms::{BaseConfig, Orientation};
     use traverse_core::graph::Graph;
     use traverse_core::tx::view::GraphView;
 
@@ -337,5 +338,55 @@ mod tests {
         let r = run_wcc(&g);
         assert_eq!(r[a.0 as usize], r[c.0 as usize]);
         assert_eq!(r[a.0 as usize], r[b.0 as usize]);
+    }
+
+    /// Nodes that reach the largest sampled component only through edges they can't see from
+    /// their own side: 4..10 only have an edge in from 0, 20's edge to 1 sits past its sample and
+    /// below its id, 30 only has an edge in from 0. All one component, in either orientation.
+    #[test]
+    fn stragglers_join_through_edges_from_the_largest_component() {
+        let mut g = Graph::new();
+        let n: Vec<_> = (0..33)
+            .map(|_| g.create_node(&["N"], Default::default()))
+            .collect();
+        let mut edges: Vec<(usize, usize)> = (1..=10).map(|i| (0, i)).collect();
+        edges.extend([
+            (1, 2),
+            (1, 3),
+            (20, 21),
+            (20, 22),
+            (20, 1),
+            (0, 30),
+            (30, 31),
+            (30, 32),
+        ]);
+        for (a, b) in edges {
+            g.create_edge(n[a], n[b], "T", Default::default()).unwrap();
+        }
+        let joined: Vec<usize> = (0..=10).chain([20, 21, 22, 30, 31, 32]).collect();
+        for orientation in [Orientation::Natural, Orientation::Undirected] {
+            let view: &(dyn GraphView + Sync) = &g;
+            let base = BaseConfig {
+                orientation,
+                ..Default::default()
+            };
+            let proj = AlgorithmGraphView::new(view, &base).unwrap();
+            let r = Wcc
+                .run(&proj, &(), &CancellationToken::none())
+                .unwrap()
+                .values;
+            for &i in &joined {
+                assert_eq!(
+                    r[n[i].0 as usize], r[n[0].0 as usize],
+                    "{orientation:?}: {i}"
+                );
+            }
+            for i in (11..20).chain(23..30) {
+                assert_ne!(
+                    r[n[i].0 as usize], r[n[0].0 as usize],
+                    "{orientation:?}: {i}"
+                );
+            }
+        }
     }
 }

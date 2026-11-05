@@ -18,6 +18,7 @@ use super::mvcc::{CommitInfo, DeltaAction, TXN_ID_SENTINEL, image_at};
 use super::timestamp::HybridTimestamp;
 use super::view::GraphView;
 use crate::error::{Error, Result};
+use crate::graph::batch::{AdjBatch, ColumnSink};
 use crate::graph::constraint::ConstraintRegistry;
 use crate::graph::edge::Edge;
 use crate::graph::index::{EdgeIndexCatalog, IndexCatalog};
@@ -411,7 +412,7 @@ impl<'a> ReadTx<'a> {
         let mut out = Vec::new();
         if let Some(set) = live {
             out.reserve(set.len());
-            for &id in set {
+            for id in set {
                 if !node_touched(g, id)
                     || self
                         .node_at(g, id)
@@ -441,7 +442,7 @@ impl<'a> ReadTx<'a> {
         let mut out = Vec::new();
         if let Some(set) = live {
             out.reserve(set.len());
-            for &id in set {
+            for id in set {
                 if !edge_touched(g, id) || self.edge_at(g, id).is_some() {
                     out.push(id);
                 }
@@ -679,6 +680,210 @@ impl GraphView for ReadTx<'_> {
         Ok(())
     }
 
+    fn gather_node_props(
+        &self,
+        ids: &[NodeId],
+        keys: &[PropertyKeyId],
+        sinks: &mut [&mut dyn ColumnSink],
+    ) -> Result<usize> {
+        let _guard = self.store.graph_rw.read();
+        let g = self.graph();
+        if !g.has_active_deltas() {
+            return Ok(g.gather_node_props(ids, keys, sinks));
+        }
+        let mut missing = 0;
+        for &id in ids {
+            match self.node_at(g, id) {
+                Some(n) => n.properties().get_multi_into(keys, sinks),
+                None => {
+                    missing += 1;
+                    for s in sinks.iter_mut() {
+                        s.push_null();
+                    }
+                }
+            }
+        }
+        Ok(missing)
+    }
+
+    fn gather_edge_props(
+        &self,
+        ids: &[EdgeId],
+        keys: &[PropertyKeyId],
+        sinks: &mut [&mut dyn ColumnSink],
+    ) -> Result<usize> {
+        let _guard = self.store.graph_rw.read();
+        let g = self.graph();
+        if !g.has_active_deltas() {
+            return Ok(g.gather_edge_props(ids, keys, sinks));
+        }
+        let mut missing = 0;
+        for &id in ids {
+            match self.edge_at(g, id) {
+                Some(e) => e.properties().get_multi_into(keys, sinks),
+                None => {
+                    missing += 1;
+                    for s in sinks.iter_mut() {
+                        s.push_null();
+                    }
+                }
+            }
+        }
+        Ok(missing)
+    }
+
+    fn nodes_exist(&self, ids: &[NodeId], out: &mut Vec<bool>) {
+        let _guard = self.store.graph_rw.read();
+        let g = self.graph();
+        out.clear();
+        out.extend(ids.iter().map(|&id| self.node_visible(g, id)));
+    }
+
+    fn edges_exist(&self, ids: &[EdgeId], out: &mut Vec<bool>) {
+        let _guard = self.store.graph_rw.read();
+        let g = self.graph();
+        out.clear();
+        if !g.has_active_deltas() {
+            out.extend(ids.iter().map(|&id| g.has_edge(id)));
+        } else {
+            out.extend(ids.iter().map(|&id| self.edge_at(g, id).is_some()));
+        }
+    }
+
+    fn nodes_have_label(&self, ids: &[NodeId], label: LabelId, out: &mut Vec<bool>) {
+        let _guard = self.store.graph_rw.read();
+        let g = self.graph();
+        out.clear();
+        if !g.has_active_deltas() {
+            match g.label_members(label) {
+                Some(set) => out.extend(ids.iter().map(|id| set.contains(id))),
+                None => out.resize(ids.len(), false),
+            }
+            return;
+        }
+        out.extend(ids.iter().map(|&id| {
+            self.node_at(g, id)
+                .is_some_and(|n| n.labels().contains(&label))
+        }));
+    }
+
+    fn count_nodes_by_label(&self, label: &str) -> usize {
+        let Some(lid) = self.meta.strings.get(label).map(LabelId) else {
+            return 0;
+        };
+        let _guard = self.store.graph_rw.read();
+        let g = self.graph();
+        if !g.has_active_deltas() {
+            return g.label_members(lid).map_or(0, |s| s.len());
+        }
+        self.nodes_with_label_at(g, lid).len()
+    }
+
+    fn count_edges_by_type(&self, edge_type: &str) -> usize {
+        let Some(tid) = self.meta.strings.get(edge_type).map(EdgeTypeId) else {
+            return 0;
+        };
+        let _guard = self.store.graph_rw.read();
+        let g = self.graph();
+        if !g.has_active_deltas() {
+            return g.type_members(tid).map_or(0, |s| s.len());
+        }
+        self.edges_with_type_at(g, tid).len()
+    }
+
+    fn count_index_lookup(&self, label: &str, prop: &str, value: &IndexKey) -> Option<usize> {
+        {
+            let _guard = self.store.graph_rw.read();
+            let g = self.graph();
+            if !g.has_active_deltas() {
+                let lid = LabelId(self.meta.strings.get(label)?);
+                let pk = PropertyKeyId(self.meta.strings.get(prop)?);
+                if !self.meta.index_catalog.has_index(lid, pk) {
+                    return None;
+                }
+                if let Some(n) = GraphView::count_index_lookup(g, label, prop, value) {
+                    return Some(n);
+                }
+            }
+        }
+        self.index_lookup(label, prop, value).map(|v| v.len())
+    }
+
+    fn count_index_range(
+        &self,
+        label: &str,
+        prop: &str,
+        lower: Bound<IndexKey>,
+        upper: Bound<IndexKey>,
+    ) -> Option<usize> {
+        {
+            let _guard = self.store.graph_rw.read();
+            let g = self.graph();
+            if !g.has_active_deltas() {
+                let lid = LabelId(self.meta.strings.get(label)?);
+                let pk = PropertyKeyId(self.meta.strings.get(prop)?);
+                if !self.meta.index_catalog.has_index(lid, pk) {
+                    return None;
+                }
+                if let Some(n) =
+                    GraphView::count_index_range(g, label, prop, lower.clone(), upper.clone())
+                {
+                    return Some(n);
+                }
+            }
+        }
+        self.index_range_lookup(label, prop, lower, upper)
+            .map(|v| v.len())
+    }
+
+    fn index_range_estimate(
+        &self,
+        label: &str,
+        prop: &str,
+        lower: &Bound<IndexKey>,
+        upper: &Bound<IndexKey>,
+    ) -> Option<f64> {
+        let _guard = self.store.graph_rw.read();
+        let g = self.graph();
+        if g.has_active_deltas() {
+            return None;
+        }
+        let lid = LabelId(self.meta.strings.get(label)?);
+        let pk = PropertyKeyId(self.meta.strings.get(prop)?);
+        if !self.meta.index_catalog.has_index(lid, pk) {
+            return None;
+        }
+        GraphView::index_range_estimate(g, label, prop, lower, upper)
+    }
+
+    fn expand_batch(
+        &self,
+        srcs: &[NodeId],
+        dir: Direction,
+        type_filter: &Option<FxHashSet<EdgeTypeId>>,
+        out: &mut AdjBatch,
+    ) -> Result<()> {
+        let _guard = self.store.graph_rw.read();
+        let g = self.graph();
+        if !g.has_active_deltas() {
+            return g.expand_batch(srcs, dir, type_filter, out);
+        }
+        for (lane, &src) in srcs.iter().enumerate() {
+            self.require_node(g, src)?;
+            let lane = lane as u32;
+            self.for_each_edge_at(g, src, dir, &mut |e, t, nb, outgoing| {
+                if type_filter.as_ref().is_none_or(|f| f.contains(&t)) {
+                    // an undirected self-loop is already listed among the outgoing entries
+                    if dir == Direction::Both && nb == src && !outgoing {
+                        return;
+                    }
+                    out.push(lane, e, t, nb, outgoing);
+                }
+            });
+        }
+        Ok(())
+    }
+
     fn edges_with_neighbor(
         &self,
         node: NodeId,
@@ -898,10 +1103,7 @@ impl GraphView for ReadTx<'_> {
         let _guard = self.store.graph_rw.read();
         let g = self.graph();
         if !g.has_active_deltas() {
-            return g
-                .label_members(lid)
-                .map(|s| s.iter().copied().collect())
-                .unwrap_or_default();
+            return g.label_members(lid).map(|s| s.to_vec()).unwrap_or_default();
         }
         self.nodes_with_label_at(g, lid)
     }
@@ -913,10 +1115,7 @@ impl GraphView for ReadTx<'_> {
         let _guard = self.store.graph_rw.read();
         let g = self.graph();
         if !g.has_active_deltas() {
-            return g
-                .type_members(tid)
-                .map(|s| s.iter().copied().collect())
-                .unwrap_or_default();
+            return g.type_members(tid).map(|s| s.to_vec()).unwrap_or_default();
         }
         self.edges_with_type_at(g, tid)
     }
@@ -987,6 +1186,68 @@ impl GraphView for ReadTx<'_> {
         Ok(self.edges_of(node, dir, None)?.len())
     }
 
+    fn degrees(&self, ids: &[NodeId], dir: Direction, out: &mut Vec<usize>) {
+        {
+            let _guard = self.store.graph_rw.read();
+            let g = self.graph();
+            if !g.has_active_deltas() {
+                out.clear();
+                out.extend(ids.iter().map(|&n| g.degree(n, dir).unwrap_or(0)));
+                return;
+            }
+        }
+        out.clear();
+        out.extend(ids.iter().map(|&n| self.degree(n, dir).unwrap_or(0)));
+    }
+
+    fn label_bitmap(&self, label: &str) -> Option<Vec<u64>> {
+        let _guard = self.store.graph_rw.read();
+        let g = self.graph();
+        if g.has_active_deltas() {
+            return None;
+        }
+        g.label_bitmap(label)
+    }
+
+    fn self_loops(&self) -> Option<usize> {
+        let _guard = self.store.graph_rw.read();
+        let g = self.graph();
+        if g.has_active_deltas() {
+            return None;
+        }
+        Some(g.self_loop_count())
+    }
+
+    fn count_nodes_where(
+        &self,
+        label: &str,
+        prop: &str,
+        cmp: crate::graph::batch::ColumnCmp,
+        bound: &crate::graph::batch::ColumnBound,
+    ) -> Option<usize> {
+        let _guard = self.store.graph_rw.read();
+        let g = self.graph();
+        if g.has_active_deltas() {
+            return None;
+        }
+        g.count_nodes_where(label, prop, cmp, bound)
+    }
+
+    fn nodes_where(
+        &self,
+        label: &str,
+        prop: &str,
+        cmp: crate::graph::batch::ColumnCmp,
+        bound: &crate::graph::batch::ColumnBound,
+    ) -> Option<Vec<NodeId>> {
+        let _guard = self.store.graph_rw.read();
+        let g = self.graph();
+        if g.has_active_deltas() {
+            return None;
+        }
+        g.nodes_where(label, prop, cmp, bound)
+    }
+
     fn strings(&self) -> &StringTable {
         &self.meta.strings
     }
@@ -1011,6 +1272,22 @@ impl GraphView for ReadTx<'_> {
         }
         let ghosts = g.versions().node_index_ghosts(lid, pk, value).collect();
         Some(self.node_index_at(g, lid, pk, live, ghosts, &|k| k == value))
+    }
+
+    // only on the live graph: with versions about, the live label counts and index entries
+    // aren't this snapshot's
+    fn property_seek(&self, prop: &str, value: &IndexKey) -> Option<Vec<NodeId>> {
+        let _guard = self.store.graph_rw.read();
+        let g = self.graph();
+        if g.has_active_deltas() {
+            return None;
+        }
+        g.property_seek(prop, value)
+    }
+
+    fn property_seek_covers(&self, prop: &str) -> bool {
+        let _guard = self.store.graph_rw.read();
+        self.graph().property_seek_covers(prop)
     }
 
     fn index_range_lookup(
@@ -1471,6 +1748,68 @@ impl GraphView for UnregisteredReadView<'_> {
         Ok(())
     }
 
+    fn gather_node_props(
+        &self,
+        ids: &[NodeId],
+        keys: &[PropertyKeyId],
+        sinks: &mut [&mut dyn ColumnSink],
+    ) -> Result<usize> {
+        Ok(self.graph().gather_node_props(ids, keys, sinks))
+    }
+
+    fn gather_edge_props(
+        &self,
+        ids: &[EdgeId],
+        keys: &[PropertyKeyId],
+        sinks: &mut [&mut dyn ColumnSink],
+    ) -> Result<usize> {
+        Ok(self.graph().gather_edge_props(ids, keys, sinks))
+    }
+
+    fn nodes_exist(&self, ids: &[NodeId], out: &mut Vec<bool>) {
+        GraphView::nodes_exist(&*self.graph(), ids, out)
+    }
+
+    fn edges_exist(&self, ids: &[EdgeId], out: &mut Vec<bool>) {
+        GraphView::edges_exist(&*self.graph(), ids, out)
+    }
+
+    fn nodes_have_label(&self, ids: &[NodeId], label: LabelId, out: &mut Vec<bool>) {
+        GraphView::nodes_have_label(&*self.graph(), ids, label, out)
+    }
+
+    fn count_nodes_by_label(&self, label: &str) -> usize {
+        GraphView::count_nodes_by_label(&*self.graph(), label)
+    }
+
+    fn count_edges_by_type(&self, edge_type: &str) -> usize {
+        GraphView::count_edges_by_type(&*self.graph(), edge_type)
+    }
+
+    fn count_index_lookup(&self, label: &str, prop: &str, value: &IndexKey) -> Option<usize> {
+        GraphView::count_index_lookup(&*self.graph(), label, prop, value)
+    }
+
+    fn count_index_range(
+        &self,
+        label: &str,
+        prop: &str,
+        lower: Bound<IndexKey>,
+        upper: Bound<IndexKey>,
+    ) -> Option<usize> {
+        GraphView::count_index_range(&*self.graph(), label, prop, lower, upper)
+    }
+
+    fn expand_batch(
+        &self,
+        srcs: &[NodeId],
+        dir: Direction,
+        type_filter: &Option<FxHashSet<EdgeTypeId>>,
+        out: &mut AdjBatch,
+    ) -> Result<()> {
+        self.graph().expand_batch(srcs, dir, type_filter, out)
+    }
+
     fn edges_with_neighbor(
         &self,
         node: NodeId,
@@ -1567,6 +1906,12 @@ impl GraphView for UnregisteredReadView<'_> {
 
     fn index_lookup(&self, label: &str, prop: &str, value: &IndexKey) -> Option<Vec<NodeId>> {
         self.graph().index_lookup(label, prop, value)
+    }
+    fn property_seek(&self, prop: &str, value: &IndexKey) -> Option<Vec<NodeId>> {
+        self.graph().property_seek(prop, value)
+    }
+    fn property_seek_covers(&self, prop: &str) -> bool {
+        self.graph().property_seek_covers(prop)
     }
     fn index_range_lookup(
         &self,

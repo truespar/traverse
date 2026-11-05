@@ -292,6 +292,54 @@ impl PageManager {
             .ok_or(Error::PageNotFound(page_id))
     }
 
+    /// Appends pages filled elsewhere, rewriting each header's page id to the id it gets
+    /// here, marked dirty; the first of those ids.
+    pub(crate) fn append_pages(&mut self, pages: Vec<Box<[u8; PAGE_SIZE]>>) -> u64 {
+        let base = self.pages.len() as u64;
+        self.pages.reserve(pages.len());
+        for (i, mut buf) in pages.into_iter().enumerate() {
+            let id = base + i as u64;
+            buf[0..8].copy_from_slice(&id.to_le_bytes());
+            self.dirty.insert(id);
+            self.pages.push(buf);
+        }
+        base
+    }
+
+    /// Mutable buffer of a page already marked dirty (the append path writes a page many
+    /// times after allocating it).
+    pub(crate) fn page_buf_mut(&mut self, page_id: u64) -> Result<&mut [u8; PAGE_SIZE]> {
+        self.pages
+            .get_mut(page_id as usize)
+            .map(|b| b.as_mut())
+            .ok_or(Error::PageNotFound(page_id))
+    }
+
+    /// Closes the backing file, keeping the pages: the caller renames the file and
+    /// [`attach_file`](Self::attach_file)s it again.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn detach_file(&mut self) {
+        self.file = None;
+    }
+
+    /// Takes the file at `path` (the one just written and renamed) as the backing file.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn attach_file(&mut self, path: &Path) -> Result<()> {
+        self.file = Some(OpenOptions::new().read(true).write(true).open(path)?);
+        self.db_path = path.to_path_buf();
+        Ok(())
+    }
+
+    /// In memory there is no file to close.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn detach_file(&mut self) {}
+
+    /// In memory there is no file to take.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn attach_file(&mut self, _path: &Path) -> Result<()> {
+        Ok(())
+    }
+
     /// File header.
     pub fn header(&self) -> &FileHeader {
         &self.header
@@ -383,6 +431,55 @@ impl PageManager {
 
         self.dirty.clear();
         Ok(())
+    }
+
+    /// [`flush`](Self::flush) for a file [`create`](Self::create) just made that nothing has
+    /// read yet: the pages go out in order, a MiB per write, checksummed on every core, with no
+    /// WAL (the caller swaps the finished file in whole, so a failure leaves nothing to recover).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn flush_new_file(&mut self) -> Result<()> {
+        if self.file.is_none() {
+            return self.flush();
+        }
+        self.lsn += 1;
+        let lsn = self.lsn;
+        {
+            use rayon::prelude::*;
+            self.pages
+                .par_iter_mut()
+                .enumerate()
+                .for_each(|(page_id, buf)| {
+                    let mut page = SlottedPage::new(buf.as_mut(), page_id as u64);
+                    page.set_lsn(lsn);
+                    page.write_checksum();
+                });
+        }
+        self.header.page_count = self.pages.len() as u64;
+        self.header.lsn = lsn;
+        let header_bytes = self.header.to_bytes();
+        let file = self.file.as_mut().expect("checked above");
+        file.seek(SeekFrom::Start(0))?;
+        file.write_all(&header_bytes)?;
+        const BATCH: usize = (1 << 20) / PAGE_SIZE;
+        let mut out = Vec::with_capacity(BATCH * PAGE_SIZE);
+        for chunk in self.pages.chunks(BATCH) {
+            out.clear();
+            for p in chunk {
+                out.extend_from_slice(p.as_ref());
+            }
+            file.write_all(&out)?;
+        }
+        file.sync_all()?;
+        self.dirty.clear();
+        self.wal_unapplied = false;
+        Ok(())
+    }
+
+    /// See the native [`flush_new_file`](Self::flush_new_file); in memory there is nothing to
+    /// write.
+    #[cfg(target_arch = "wasm32")]
+    pub fn flush_new_file(&mut self) -> Result<()> {
+        self.flush()
     }
 
     /// After a failed [`flush`](Self::flush): whether it got past committing its WAL, i.e. its

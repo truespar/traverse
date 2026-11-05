@@ -192,6 +192,12 @@ class TestQueryResult:
             values = [row["x"] for row in result]
             assert values == [1, 2, 3]
 
+    def test_values_method(self, db):
+        with db.begin() as tx:
+            result = tx.execute("UNWIND [1, 2] AS x RETURN x, 'v' + toString(x) AS y")
+            assert result.values() == [(1, "v1"), (2, "v2")]
+            assert tx.execute("RETURN 1 AS x LIMIT 0").values() == []
+
     def test_data_method(self, db):
         with db.begin() as tx:
             result = tx.execute("UNWIND ['a', 'b'] AS x RETURN x")
@@ -640,6 +646,26 @@ class TestBulkWriter:
             result = tx.execute("MATCH (n:Batch) RETURN count(n)")
             assert list(result)[0]["count(n)"] == count
 
+    def test_bulk_load_csv(self, db, tmp_path):
+        nodes = tmp_path / "nodes.csv"
+        nodes.write_text("id,name,age,ok\n1,ann,30,true\n2,bob,,false\n3,cy,41,true\n", encoding="utf-8")
+        edges = tmp_path / "edges.csv"
+        edges.write_text("src,dst\n1,2\n2,3\n3,3\n9,1\n", encoding="utf-8")
+        writer = db.bulk_writer()
+        columns = {"id": "int", "name": "string", "age": "int", "ok": "bool"}
+        assert writer.load_nodes_csv(str(nodes), ["Csv"], columns, key="id") == 3
+        assert writer.load_edges_csv(str(edges), "KNOWS", "src", "dst") == (3, 1)
+        writer.commit()
+
+        with db.begin() as tx:
+            rows = list(tx.execute(
+                "MATCH (n:Csv) RETURN n.id AS id, n.name AS name, n.age AS age, n.ok AS ok ORDER BY id"))
+            assert [r["id"] for r in rows] == [1, 2, 3]
+            assert rows[1]["age"] is None
+            assert rows[0]["ok"] is True and rows[1]["ok"] is False
+            assert list(tx.execute("MATCH (:Csv)-[r:KNOWS]->() RETURN count(r) AS c"))[0]["c"] == 3
+            assert list(tx.execute("MATCH (n:Csv {id: 3})-[:KNOWS]->(n) RETURN count(*) AS c"))[0]["c"] == 1
+
     def test_bulk_insert_nodes_and_edges_graph(self, db):
         writer = db.bulk_writer()
         ids = [writer.create_node(["Chain"], {"pos": i}) for i in range(5)]
@@ -1041,7 +1067,8 @@ class TestLifetimes:
 # ---------------------------------------------------------------------------
 
 # a three-way cross product over 2,000 nodes: minutes of work unless stopped
-LONG = "MATCH (a:Big), (b:Big), (c:Big) RETURN count(*)"
+# 8e9 rows, every one through the filter (a bare count of the product is answered from the label counts)
+LONG = "MATCH (a:Big), (b:Big), (c:Big) WHERE a.i + b.i + c.i > 0 RETURN count(*)"
 
 
 def seed_big(db):

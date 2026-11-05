@@ -103,11 +103,14 @@ impl GraphAlgorithm for TriangleCount {
                                 adj.push(u.0);
                             }
                         });
-                        graph.for_each_in(v, &mut |u, _eid, _w| {
-                            if u != v {
-                                adj.push(u.0);
-                            }
-                        });
+                        // an undirected projection lists both directions as out already
+                        if !graph.is_undirected() {
+                            graph.for_each_in(v, &mut |u, _eid, _w| {
+                                if u != v {
+                                    adj.push(u.0);
+                                }
+                            });
+                        }
                     }
                 }
                 adj.sort_unstable();

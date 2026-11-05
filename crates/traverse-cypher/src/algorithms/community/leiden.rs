@@ -253,11 +253,14 @@ fn build_internal_graph(
                             *row.entry(ui).or_insert(0.0) += w;
                         }
                     });
-                    graph.for_each_in(v, &mut |u, _eid, w| {
-                        if let Some(&ui) = node_to_idx_ref.get(&u.0) {
-                            *row.entry(ui).or_insert(0.0) += w;
-                        }
-                    });
+                    // an undirected projection lists both directions as out already
+                    if !graph.is_undirected() {
+                        graph.for_each_in(v, &mut |u, _eid, w| {
+                            if let Some(&ui) = node_to_idx_ref.get(&u.0) {
+                                *row.entry(ui).or_insert(0.0) += w;
+                            }
+                        });
+                    }
                 }
             }
             let mut adj_row: Vec<(u32, f64)> = Vec::with_capacity(row.len());

@@ -257,6 +257,16 @@ impl DatabaseRegistry {
         }
     }
 
+    /// The default database as loaded from its file and saved as is: nothing for a checkpoint to
+    /// write until a commit marks it (`unsaved`: commits replayed from the redo log aren't in the
+    /// file yet), as in directory mode.
+    pub fn loaded(self, unsaved: bool) -> Self {
+        if let Some(entry) = self.databases.read_unpoisoned().get(&self.default_db) {
+            entry.dirty.store(unsaved, Ordering::Release);
+        }
+        self
+    }
+
     /// The default database's metadata as read from its file, so saves keep it.
     pub fn with_metadata(self, metadata: Vec<u8>) -> Self {
         Self {

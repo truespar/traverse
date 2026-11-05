@@ -1153,7 +1153,11 @@ pub(crate) fn open_registry(
     if path.is_file() || path.extension().is_some_and(|e| e == "tvdb") {
         // single-file mode: the "traverse" (or configured default) database
         tracing::info!("opening database at {}", path.display());
+        let existed = path.is_file();
         let db = Database::open_with_durability(&path, crate::registry::wal_durability_enabled())?;
+        // a new database has no file yet, and commits replayed from the log aren't in the file: a
+        // save must write them
+        let unsaved = !existed || db.replayed_transactions() > 0;
         let (graph, db_path, metadata, log_writer, recovery_floor) = db.into_parts();
         let node_count = graph.node_count();
         let edge_count = graph.edge_count();
@@ -1176,7 +1180,9 @@ pub(crate) fn open_registry(
             recovery_floor,
         ));
         Ok(Arc::new(
-            DatabaseRegistry::single(default_db, store, Some(db_path)).with_metadata(metadata),
+            DatabaseRegistry::single(default_db, store, Some(db_path))
+                .loaded(unsaved)
+                .with_metadata(metadata),
         ))
     } else if path.is_dir() {
         // directory mode: each *.tvdb becomes a named database
@@ -1543,6 +1549,42 @@ mod tests {
         let users = open_user_catalog(&cfg, &registry).unwrap();
         assert_eq!(users.list_users(), vec![("root", Role::Admin)]);
         assert_eq!(stored_users(dir.path()), vec![("root".into(), Role::Admin)]);
+    }
+
+    /// A database file opened in single-file mode is saved already: nothing for the periodic
+    /// checkpoint to rewrite until a commit marks it, as in directory mode. A path with no file
+    /// yet is created by the first save.
+    #[test]
+    fn a_single_file_opens_clean() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("one.tvdb");
+        let mut g = Graph::new();
+        g.create_node(&["N"], Default::default());
+        Database::save(&path, &g, &[]).unwrap();
+        let cfg = ServerConfig {
+            data: Some(path.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let registry = open_registry(&cfg, None).unwrap();
+        assert!(
+            !registry
+                .default_entry()
+                .dirty
+                .load(std::sync::atomic::Ordering::Acquire),
+            "an opened file starts dirty"
+        );
+
+        let cfg = ServerConfig {
+            data: Some(dir.path().join("new.tvdb").to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let registry = open_registry(&cfg, None).unwrap();
+        assert!(
+            registry
+                .default_entry()
+                .dirty
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
     }
 
     /// The seed admin is saved when it's created, and only seeds an empty catalog.

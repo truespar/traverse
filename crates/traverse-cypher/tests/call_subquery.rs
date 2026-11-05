@@ -77,23 +77,24 @@ fn call_subquery_explicit_imports() {
 }
 
 #[test]
-fn call_subquery_with_writes_in_body_errors_clearly() {
-    // writes inside a plain CALL subquery body aren't supported (the shared read-only
-    // `exec_subquery` interpreter runs no write operators); they must fail with a *clear* message,
-    // not silently do nothing or give a confusing parse error
+fn call_subquery_with_writes_in_body() {
+    // a unit subquery with writes runs per outer row and keeps the outer cardinality
     let mut g = Graph::new();
-    let err = run(
+    let rows = run(
         &mut g,
-        "UNWIND [1, 2, 3] AS x CALL { CREATE (:Widget {v: x}) } RETURN x",
+        "UNWIND [1, 2, 3] AS x CALL { WITH x CREATE (:Widget {v: x}) } RETURN x",
     )
-    .expect_err("writes in CALL body not yet supported");
-    assert!(
-        err.contains("not yet supported"),
-        "expected a clear not-yet-supported message, got: {err}"
+    .expect("writes in a CALL body");
+    assert_eq!(rows.len(), 3);
+    let rows = run(
+        &mut g,
+        "MATCH (w:Widget) RETURN count(w) AS c, sum(w.v) AS s",
+    )
+    .expect("count");
+    assert_eq!(
+        rows[0],
+        vec![CypherValue::Integer(3), CypherValue::Integer(6)]
     );
-    // nothing written
-    let rows = run(&mut g, "MATCH (w:Widget) RETURN count(w) AS c").expect("count");
-    assert_eq!(rows[0][0], CypherValue::Integer(0));
 }
 
 #[test]

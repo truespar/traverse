@@ -218,6 +218,23 @@ fn push_filter_down_inner(plan: LogicalPlan) -> LogicalPlan {
                 };
             }
 
+            // filters commute: one that can't sink would otherwise hold every filter above it
+            // (the WHERE of `MATCH (a)-[r]->(b), (c)-[s]->(d)` over the check that keeps `r` and
+            // `s` apart, which reads both sides), so sink this one past it when it goes further
+            LogicalPlan::Filter {
+                input: inner_input,
+                predicate: inner_predicate,
+            } if sinks_below(&pred_vars, &inner_input) => {
+                let pushed = push_filter_down_inner(LogicalPlan::Filter {
+                    input: inner_input,
+                    predicate,
+                });
+                return LogicalPlan::Filter {
+                    input: Box::new(pushed),
+                    predicate: inner_predicate,
+                };
+            }
+
             other => {
                 return LogicalPlan::Filter {
                     input: Box::new(other),
@@ -227,6 +244,22 @@ fn push_filter_down_inner(plan: LogicalPlan) -> LogicalPlan {
         }
     }
     plan
+}
+
+/// A filter reading `vars` goes below `plan`'s top in `push_filter_down_inner`: into one side of
+/// a CrossProduct, below an expand, or past a filter it goes below.
+fn sinks_below(vars: &HashSet<String>, plan: &LogicalPlan) -> bool {
+    match plan {
+        LogicalPlan::CrossProduct { left, right } => {
+            vars.is_subset(&plan_output_variables(left))
+                || vars.is_subset(&plan_output_variables(right))
+        }
+        LogicalPlan::ExpandOut { input, .. }
+        | LogicalPlan::ExpandIn { input, .. }
+        | LogicalPlan::ExpandBoth { input, .. } => vars.is_subset(&plan_output_variables(input)),
+        LogicalPlan::Filter { input, .. } => sinks_below(vars, input),
+        _ => false,
+    }
 }
 
 // -- Pass: fuse filters -----------------------------------------------

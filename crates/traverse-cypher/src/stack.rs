@@ -21,11 +21,10 @@
 //!    [`DEEP_PLAN_DEPTH`] ([`run_deep_plan`]). Normal queries pay a few integer
 //!    compares and a short plan walk; nothing per row or per expression node.
 //! 2. `#[recursive::recursive]` (stacker growth) on the compile-time walkers
-//!    (parser ladder, validator, planner, optimizer, symbol table, bytecode
-//!    compiler, plan formatting) and the var-length path DFS: one pointer
-//!    compare per call on once-per-query (or per-hop) paths. Per-row evaluators
-//!    and `Operator::next` are deliberately *not* annotated: layer 1 covers
-//!    them, and a per-node-per-row check costs ~10% on evaluation-heavy queries.
+//!    (parser ladder, validator, planner, optimizer, physical lowering,
+//!    expression compiler, plan formatting), the operator builder and the
+//!    per-chunk expression evaluators: one pointer compare per call on
+//!    once-per-query or once-per-chunk paths, never per row.
 //! 3. Prefix chains (`NOT NOT ...`, `- - ...`, `!!...`) parse iteratively, using no
 //!    parser stack.
 //! 4. Hard limits ([`MAX_NESTING_DEPTH`] and [`MAX_CHAIN_LENGTH`] in both parsers,

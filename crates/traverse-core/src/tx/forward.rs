@@ -169,6 +169,90 @@ macro_rules! forward_graph_view_reads {
             )
         }
 
+        fn gather_node_props(
+            &$self,
+            ids: &[$crate::graph::types::NodeId],
+            keys: &[$crate::graph::types::PropertyKeyId],
+            sinks: &mut [&mut dyn $crate::graph::batch::ColumnSink],
+        ) -> $crate::error::Result<usize> {
+            $crate::tx::view::GraphView::gather_node_props($inner, ids, keys, sinks)
+        }
+
+        fn gather_edge_props(
+            &$self,
+            ids: &[$crate::graph::types::EdgeId],
+            keys: &[$crate::graph::types::PropertyKeyId],
+            sinks: &mut [&mut dyn $crate::graph::batch::ColumnSink],
+        ) -> $crate::error::Result<usize> {
+            $crate::tx::view::GraphView::gather_edge_props($inner, ids, keys, sinks)
+        }
+
+        fn nodes_exist(&$self, ids: &[$crate::graph::types::NodeId], out: &mut ::std::vec::Vec<bool>) {
+            $crate::tx::view::GraphView::nodes_exist($inner, ids, out)
+        }
+
+        fn edges_exist(&$self, ids: &[$crate::graph::types::EdgeId], out: &mut ::std::vec::Vec<bool>) {
+            $crate::tx::view::GraphView::edges_exist($inner, ids, out)
+        }
+
+        fn nodes_have_label(
+            &$self,
+            ids: &[$crate::graph::types::NodeId],
+            label: $crate::graph::types::LabelId,
+            out: &mut ::std::vec::Vec<bool>,
+        ) {
+            $crate::tx::view::GraphView::nodes_have_label($inner, ids, label, out)
+        }
+
+        fn count_nodes_by_label(&$self, label: &str) -> usize {
+            $crate::tx::view::GraphView::count_nodes_by_label($inner, label)
+        }
+
+        fn count_edges_by_type(&$self, edge_type: &str) -> usize {
+            $crate::tx::view::GraphView::count_edges_by_type($inner, edge_type)
+        }
+
+        fn count_index_lookup(
+            &$self,
+            label: &str,
+            prop: &str,
+            value: &$crate::graph::property::IndexKey,
+        ) -> ::std::option::Option<usize> {
+            $crate::tx::view::GraphView::count_index_lookup($inner, label, prop, value)
+        }
+
+        fn count_index_range(
+            &$self,
+            label: &str,
+            prop: &str,
+            lower: ::std::ops::Bound<$crate::graph::property::IndexKey>,
+            upper: ::std::ops::Bound<$crate::graph::property::IndexKey>,
+        ) -> ::std::option::Option<usize> {
+            $crate::tx::view::GraphView::count_index_range($inner, label, prop, lower, upper)
+        }
+
+        fn index_range_estimate(
+            &$self,
+            label: &str,
+            prop: &str,
+            lower: &::std::ops::Bound<$crate::graph::property::IndexKey>,
+            upper: &::std::ops::Bound<$crate::graph::property::IndexKey>,
+        ) -> ::std::option::Option<f64> {
+            $crate::tx::view::GraphView::index_range_estimate($inner, label, prop, lower, upper)
+        }
+
+        fn expand_batch(
+            &$self,
+            srcs: &[$crate::graph::types::NodeId],
+            dir: $crate::graph::types::Direction,
+            type_filter: &::std::option::Option<
+                $crate::__rustc_hash::FxHashSet<$crate::graph::types::EdgeTypeId>,
+            >,
+            out: &mut $crate::graph::batch::AdjBatch,
+        ) -> $crate::error::Result<()> {
+            $crate::tx::view::GraphView::expand_batch($inner, srcs, dir, type_filter, out)
+        }
+
         fn adjacency_snapshot(
             &$self,
         ) -> ::std::option::Option<$crate::graph::adjacency::AdjacencySnapshot<'_>> {
@@ -256,6 +340,43 @@ macro_rules! forward_graph_view_reads {
             $crate::tx::view::GraphView::degree($inner, node, dir)
         }
 
+        fn degrees(
+            &$self,
+            ids: &[$crate::graph::types::NodeId],
+            dir: $crate::graph::types::Direction,
+            out: &mut ::std::vec::Vec<usize>,
+        ) {
+            $crate::tx::view::GraphView::degrees($inner, ids, dir, out)
+        }
+
+        fn label_bitmap(&$self, label: &str) -> ::std::option::Option<::std::vec::Vec<u64>> {
+            $crate::tx::view::GraphView::label_bitmap($inner, label)
+        }
+
+        fn self_loops(&$self) -> ::std::option::Option<usize> {
+            $crate::tx::view::GraphView::self_loops($inner)
+        }
+
+        fn count_nodes_where(
+            &$self,
+            label: &str,
+            prop: &str,
+            cmp: $crate::graph::batch::ColumnCmp,
+            bound: &$crate::graph::batch::ColumnBound,
+        ) -> ::std::option::Option<usize> {
+            $crate::tx::view::GraphView::count_nodes_where($inner, label, prop, cmp, bound)
+        }
+
+        fn nodes_where(
+            &$self,
+            label: &str,
+            prop: &str,
+            cmp: $crate::graph::batch::ColumnCmp,
+            bound: &$crate::graph::batch::ColumnBound,
+        ) -> ::std::option::Option<::std::vec::Vec<$crate::graph::types::NodeId>> {
+            $crate::tx::view::GraphView::nodes_where($inner, label, prop, cmp, bound)
+        }
+
         fn strings(&$self) -> &$crate::interner::StringTable {
             $crate::tx::view::GraphView::strings($inner)
         }
@@ -271,6 +392,18 @@ macro_rules! forward_graph_view_reads {
             value: &$crate::graph::property::IndexKey,
         ) -> ::std::option::Option<::std::vec::Vec<$crate::graph::types::NodeId>> {
             $crate::tx::view::GraphView::index_lookup($inner, label, prop, value)
+        }
+
+        fn property_seek(
+            &$self,
+            prop: &str,
+            value: &$crate::graph::property::IndexKey,
+        ) -> ::std::option::Option<::std::vec::Vec<$crate::graph::types::NodeId>> {
+            $crate::tx::view::GraphView::property_seek($inner, prop, value)
+        }
+
+        fn property_seek_covers(&$self, prop: &str) -> bool {
+            $crate::tx::view::GraphView::property_seek_covers($inner, prop)
         }
 
         fn index_range_lookup(

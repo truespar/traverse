@@ -40,22 +40,24 @@ fn reverse_expand_direction_inner(plan: LogicalPlan, graph: &dyn GraphView) -> L
     }
 
     // step 2: walk down the Expand chain collecting hops: same direction,
-    // fixed-length, no ExpandBoth. prior_edge_vars aren't carried: the chain must
-    // end in a plain Scan (step 3), so each hop's uniqueness set is the rel_vars of
-    // the hops below, which the reversed chain regenerates (step 6).
+    // fixed-length, no ExpandBoth. The chain must end in a plain Scan (step 3), so a
+    // hop's prior_edge_vars name hops below it; the reversed chain keeps the same
+    // pairs apart (step 6), which is not every pair when the chain spans MATCH
+    // clauses or a WALK part.
     struct ExpandHop {
         from: String,
         rel_var: String,
         to: String,
         edge_types: Vec<String>,
         direction: Direction,
+        prior_edge_vars: Vec<String>,
     }
 
     let mut expands: Vec<ExpandHop> = Vec::new();
     let mut chain_bottom = current;
 
     loop {
-        let (input, from, rel_var, to, edge_types, range, _prior_edge_vars, direction) =
+        let (input, from, rel_var, to, edge_types, range, prior_edge_vars, direction) =
             match chain_bottom {
                 LogicalPlan::ExpandOut {
                     input,
@@ -117,11 +119,20 @@ fn reverse_expand_direction_inner(plan: LogicalPlan, graph: &dyn GraphView) -> L
             to: to.clone(),
             edge_types: edge_types.clone(),
             direction,
+            prior_edge_vars: prior_edge_vars.clone(),
         });
         chain_bottom = input;
     }
 
     if expands.is_empty() {
+        return plan;
+    }
+    // a relationship kept off from outside the chain can't be kept off from the other end
+    if expands.iter().any(|h| {
+        h.prior_edge_vars
+            .iter()
+            .any(|p| !expands.iter().any(|e| &e.rel_var == p))
+    }) {
         return plan;
     }
 
@@ -227,10 +238,20 @@ fn reverse_expand_direction_inner(plan: LogicalPlan, graph: &dyn GraphView) -> L
     }
 
     // reversed chain, outermost expand first (closest to the new scan): swap direction and from/to;
-    // prior_edge_vars regenerate, [] for the first, then the rel_vars of the preceding reversed
-    // expands
-    let mut reversed_prior: Vec<String> = Vec::new();
+    // each hop keeps off the preceding reversed hops it was kept apart from before
+    let apart = |a: &ExpandHop, b: &str| {
+        a.prior_edge_vars.iter().any(|p| p == b)
+            || expands
+                .iter()
+                .any(|e| e.rel_var == b && e.prior_edge_vars.contains(&a.rel_var))
+    };
+    let mut preceding: Vec<String> = Vec::new();
     for expand in &expands {
+        let reversed_prior: Vec<String> = preceding
+            .iter()
+            .filter(|p| apart(expand, p))
+            .cloned()
+            .collect();
         let reversed_direction = match expand.direction {
             Direction::Outgoing => Direction::Incoming,
             Direction::Incoming => Direction::Outgoing,
@@ -244,7 +265,7 @@ fn reverse_expand_direction_inner(plan: LogicalPlan, graph: &dyn GraphView) -> L
                 to: expand.from.clone(),
                 edge_types: expand.edge_types.clone(),
                 range: None,
-                prior_edge_vars: reversed_prior.clone(),
+                prior_edge_vars: reversed_prior,
             },
             Direction::Incoming => LogicalPlan::ExpandIn {
                 input: Box::new(new_plan),
@@ -253,11 +274,11 @@ fn reverse_expand_direction_inner(plan: LogicalPlan, graph: &dyn GraphView) -> L
                 to: expand.from.clone(),
                 edge_types: expand.edge_types.clone(),
                 range: None,
-                prior_edge_vars: reversed_prior.clone(),
+                prior_edge_vars: reversed_prior,
             },
             Direction::Both => unreachable!(),
         };
-        reversed_prior.push(expand.rel_var.clone());
+        preceding.push(expand.rel_var.clone());
     }
 
     // source label filter (the original scan label becomes a post-expand filter)

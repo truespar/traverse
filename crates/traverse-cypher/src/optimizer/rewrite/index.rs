@@ -69,6 +69,19 @@ fn convert_filter_to_index_scan_inner(plan: LogicalPlan, hints: &IndexHints) -> 
                 }
             }
         }
+        // an indexed `var.prop = val` among the conjuncts: seek it, the whole predicate stays on
+        // top (the seek only prunes)
+        if let Some((prop, value)) = first_indexed_eq_conjunct(predicate, variable, label, hints) {
+            return LogicalPlan::Filter {
+                input: Box::new(LogicalPlan::IndexScan {
+                    variable: variable.clone(),
+                    label: label.clone(),
+                    property: prop,
+                    value,
+                }),
+                predicate: predicate.clone(),
+            };
+        }
         // fallback: range predicate (>, >=, <, <=)
         if let Some((prop, op, value)) = extract_range_property_check(predicate, variable)
             && hints.contains(&(label.clone(), prop.clone()))
@@ -83,6 +96,25 @@ fn convert_filter_to_index_scan_inner(plan: LogicalPlan, hints: &IndexHints) -> 
         }
     }
     plan
+}
+
+/// The first top-level conjunct of an AND tree that is `var.prop = <indexable>` with an index on
+/// `(label, prop)`, in predicate order.
+fn first_indexed_eq_conjunct(
+    predicate: &Expr,
+    variable: &str,
+    label: &str,
+    hints: &IndexHints,
+) -> Option<(String, Expr)> {
+    #[recursive::recursive]
+    fn walk(e: &Expr, var: &str, label: &str, hints: &IndexHints) -> Option<(String, Expr)> {
+        if let Expr::BinaryOp(l, crate::ast::BinOp::And, r) = e {
+            return walk(l, var, label, hints).or_else(|| walk(r, var, label, hints));
+        }
+        extract_eq_property_check(e, var)
+            .filter(|(prop, _)| hints.contains(&(label.to_string(), prop.clone())))
+    }
+    walk(predicate, variable, label, hints)
 }
 
 /// Top-level `var.prop = <indexable>` conjuncts of an AND tree -> prop -> value (first wins).

@@ -7,6 +7,7 @@ use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
 
 use crate::error::{Error, Result};
+use crate::graph::batch::{AdjBatch, ColumnSink};
 use crate::graph::constraint::{ConstraintRegistry, ConstraintType};
 use crate::graph::edge::Edge;
 use crate::graph::index::{EdgeIndexCatalog, IndexCatalog};
@@ -218,6 +219,164 @@ impl GraphView for OptimisticTx<'_> {
             .collect())
     }
 
+    fn gather_node_props(
+        &self,
+        ids: &[NodeId],
+        keys: &[PropertyKeyId],
+        sinks: &mut [&mut dyn ColumnSink],
+    ) -> Result<usize> {
+        if self.local.nodes.is_empty() {
+            return self.base.gather_node_props(ids, keys, sinks);
+        }
+        let mut missing = 0;
+        for &id in ids {
+            match self.local.nodes.get(&id) {
+                Some(Some(n)) => n.properties.get_multi_into(keys, sinks),
+                Some(None) => {
+                    missing += 1;
+                    for s in sinks.iter_mut() {
+                        s.push_null();
+                    }
+                }
+                None => missing += self.base.gather_node_props(&[id], keys, sinks)?,
+            }
+        }
+        Ok(missing)
+    }
+
+    fn gather_edge_props(
+        &self,
+        ids: &[EdgeId],
+        keys: &[PropertyKeyId],
+        sinks: &mut [&mut dyn ColumnSink],
+    ) -> Result<usize> {
+        if self.local.edges.is_empty() {
+            return self.base.gather_edge_props(ids, keys, sinks);
+        }
+        let mut missing = 0;
+        for &id in ids {
+            match self.local.edges.get(&id) {
+                Some(Some(e)) => e.properties.get_multi_into(keys, sinks),
+                Some(None) => {
+                    missing += 1;
+                    for s in sinks.iter_mut() {
+                        s.push_null();
+                    }
+                }
+                None => missing += self.base.gather_edge_props(&[id], keys, sinks)?,
+            }
+        }
+        Ok(missing)
+    }
+
+    fn nodes_exist(&self, ids: &[NodeId], out: &mut Vec<bool>) {
+        if self.local.nodes.is_empty() {
+            return self.base.nodes_exist(ids, out);
+        }
+        out.clear();
+        out.extend(ids.iter().map(|&id| self.node_ref(id).is_some()));
+    }
+
+    fn edges_exist(&self, ids: &[EdgeId], out: &mut Vec<bool>) {
+        if self.local.edges.is_empty() {
+            return self.base.edges_exist(ids, out);
+        }
+        out.clear();
+        out.extend(ids.iter().map(|&id| self.edge_ref(id).is_some()));
+    }
+
+    fn nodes_have_label(&self, ids: &[NodeId], label: LabelId, out: &mut Vec<bool>) {
+        if self.local.nodes.is_empty() {
+            return self.base.nodes_have_label(ids, label, out);
+        }
+        out.clear();
+        out.extend(
+            ids.iter()
+                .map(|&id| self.node_ref(id).is_some_and(|n| n.labels.contains(&label))),
+        );
+    }
+
+    fn count_nodes_by_label(&self, label: &str) -> usize {
+        if self.local.nodes.is_empty() {
+            return self.base.count_nodes_by_label(label);
+        }
+        self.nodes_by_label(label).len()
+    }
+
+    fn count_edges_by_type(&self, edge_type: &str) -> usize {
+        if self.local.edges.is_empty() {
+            return self.base.count_edges_by_type(edge_type);
+        }
+        self.edges_by_type(edge_type).len()
+    }
+
+    fn count_index_lookup(&self, label: &str, prop: &str, value: &IndexKey) -> Option<usize> {
+        if self.local.is_empty() {
+            return self.base.count_index_lookup(label, prop, value);
+        }
+        self.index_lookup(label, prop, value).map(|v| v.len())
+    }
+
+    fn count_index_range(
+        &self,
+        label: &str,
+        prop: &str,
+        lower: Bound<IndexKey>,
+        upper: Bound<IndexKey>,
+    ) -> Option<usize> {
+        if self.local.is_empty() {
+            return self.base.count_index_range(label, prop, lower, upper);
+        }
+        self.index_range_lookup(label, prop, lower, upper)
+            .map(|v| v.len())
+    }
+
+    fn index_range_estimate(
+        &self,
+        label: &str,
+        prop: &str,
+        lower: &Bound<IndexKey>,
+        upper: &Bound<IndexKey>,
+    ) -> Option<f64> {
+        if self.local.is_empty() {
+            self.base.index_range_estimate(label, prop, lower, upper)
+        } else {
+            None
+        }
+    }
+
+    fn expand_batch(
+        &self,
+        srcs: &[NodeId],
+        dir: Direction,
+        type_filter: &Option<FxHashSet<EdgeTypeId>>,
+        out: &mut AdjBatch,
+    ) -> Result<()> {
+        if srcs.iter().all(|&n| self.adjacency_is_base(n)) {
+            return self.base.expand_batch(srcs, dir, type_filter, out);
+        }
+        for (lane, &src) in srcs.iter().enumerate() {
+            let lane_u = lane as u32;
+            if self.adjacency_is_base(src) {
+                let before = out.len();
+                self.base.expand_batch(&[src], dir, type_filter, out)?;
+                for l in &mut out.src_lane[before..] {
+                    *l = lane_u;
+                }
+                continue;
+            }
+            for (edge_id, edge_type, neighbor, outgoing) in self.edges_at(src, dir)? {
+                if type_filter.as_ref().is_none_or(|f| f.contains(&edge_type)) {
+                    if dir == Direction::Both && neighbor == src && !outgoing {
+                        continue;
+                    }
+                    out.push(lane_u, edge_id, edge_type, neighbor, outgoing);
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn edges_with_neighbor(
         &self,
         node: NodeId,
@@ -347,6 +506,70 @@ impl GraphView for OptimisticTx<'_> {
             return self.base.degree(node, dir);
         }
         Ok(self.edges_at(node, dir)?.len())
+    }
+
+    fn self_loops(&self) -> Option<usize> {
+        if !OptimisticTx::has_writes(self) {
+            self.base.self_loops()
+        } else {
+            None
+        }
+    }
+
+    fn count_nodes_where(
+        &self,
+        label: &str,
+        prop: &str,
+        cmp: crate::graph::batch::ColumnCmp,
+        bound: &crate::graph::batch::ColumnBound,
+    ) -> Option<usize> {
+        if !OptimisticTx::has_writes(self) {
+            self.base.count_nodes_where(label, prop, cmp, bound)
+        } else {
+            None
+        }
+    }
+
+    fn nodes_where(
+        &self,
+        label: &str,
+        prop: &str,
+        cmp: crate::graph::batch::ColumnCmp,
+        bound: &crate::graph::batch::ColumnBound,
+    ) -> Option<Vec<NodeId>> {
+        if !OptimisticTx::has_writes(self) {
+            self.base.nodes_where(label, prop, cmp, bound)
+        } else {
+            None
+        }
+    }
+
+    fn label_bitmap(&self, label: &str) -> Option<Vec<u64>> {
+        if !OptimisticTx::has_writes(self) {
+            self.base.label_bitmap(label)
+        } else {
+            None
+        }
+    }
+
+    fn degrees(&self, ids: &[NodeId], dir: Direction, out: &mut Vec<usize>) {
+        out.clear();
+        out.resize(ids.len(), 0);
+        let mut base_ids = Vec::new();
+        let mut base_at = Vec::new();
+        for (i, &n) in ids.iter().enumerate() {
+            if self.adjacency_is_base(n) {
+                base_ids.push(n);
+                base_at.push(i);
+            } else {
+                out[i] = self.edges_at(n, dir).map(|e| e.len()).unwrap_or(0);
+            }
+        }
+        let mut base = Vec::new();
+        self.base.degrees(&base_ids, dir, &mut base);
+        for (i, d) in base_at.into_iter().zip(base) {
+            out[i] = d;
+        }
     }
 
     fn get_node_property(&self, id: NodeId, key: &str) -> Result<Option<PropertyValue>> {

@@ -236,7 +236,7 @@ pub(super) fn analyze(plan: LogicalPlan, ctx: &mut VarKinds) -> (LogicalPlan, Su
                 s,
             )
         }
-        P::SeededRows(_) | P::EmptyRow | P::ContextSeed => (plan, Summary::settled()),
+        P::EmptyRow | P::ContextSeed => (plan, Summary::settled()),
 
         // -- streaming unary readers --
         P::Filter { input, predicate } => {
@@ -814,8 +814,7 @@ pub(super) fn analyze(plan: LogicalPlan, ctx: &mut VarKinds) -> (LogicalPlan, Su
             body,
             return_aliases,
         } => {
-            // outer rows drain first; the body runs in the read-only record interpreter (no Eager
-            // there, and it rejects writes itself): leave it
+            // outer rows drain first; the body runs per outer row as its own plan: leave it
             let (input, _) = analyze_boxed(input, ctx);
             for a in &return_aliases {
                 ctx.bind(a, Kind::Unknown);

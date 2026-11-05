@@ -262,7 +262,10 @@ impl GraphAlgorithm for HashGnn {
                         }
                         _ => {
                             graph.for_each_out(v, &mut |u, _eid, w| visit(u, w));
-                            graph.for_each_in(v, &mut |u, _eid, w| visit(u, w));
+                            // an undirected projection lists both directions as out already
+                            if !graph.is_undirected() {
+                                graph.for_each_in(v, &mut |u, _eid, w| visit(u, w));
+                            }
                         }
                     }
                     if neighbor_bits.is_empty() {

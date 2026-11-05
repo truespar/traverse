@@ -16,6 +16,7 @@ use std::fmt;
 use rkyv::{Archive, Deserialize as RkyvDeserialize, Serialize as RkyvSerialize};
 use serde::{Deserialize, Serialize};
 
+use super::batch::ColumnSink;
 use super::property::PropertyValue;
 use super::types::PropertyKeyId;
 
@@ -35,6 +36,21 @@ const TAG_DURATION: u8 = 10;
 const TAG_POINT2D: u8 = 11;
 const TAG_POINT3D: u8 = 12;
 const TAG_VECTOR: u8 = 13;
+
+/// A scalar property value borrowed from the store.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Scalar<'a> {
+    /// Boolean.
+    Bool(bool),
+    /// Integer.
+    Int(i64),
+    /// Float.
+    Float(f64),
+    /// String.
+    Str(&'a str),
+    /// A list, map, temporal, point, vector or byte value.
+    Other,
+}
 
 // -- CompactPropertyStore -------------------------------------------------
 
@@ -136,6 +152,43 @@ impl CompactPropertyStore {
         })
     }
 
+    /// The scalar at `key` borrowed from the store; `None` if missing or a stored null,
+    /// [`Scalar::Other`] for a value the typed columns don't hold.
+    pub fn get_scalar(&self, key: PropertyKeyId) -> Option<Scalar<'_>> {
+        let (offset, _end) = self.find_entry(key)?;
+        let d = &self.data;
+        let meta = d[offset];
+        let tag = meta & 0x0F;
+        let kw = (meta >> 4) & 0x03;
+        let vw = (meta >> 6) & 0x03;
+        let key_size: usize = match kw {
+            0 => 1,
+            1 => 2,
+            _ => 4,
+        };
+        let p = offset + 1 + key_size;
+        Some(match tag {
+            TAG_NULL => return None,
+            TAG_BOOL_FALSE => Scalar::Bool(false),
+            TAG_BOOL_TRUE => Scalar::Bool(true),
+            TAG_INT => Scalar::Int(match vw {
+                0 => d[p] as i8 as i64,
+                1 => i16::from_le_bytes([d[p], d[p + 1]]) as i64,
+                2 => i32::from_le_bytes(d[p..p + 4].try_into().unwrap()) as i64,
+                _ => i64::from_le_bytes(d[p..p + 8].try_into().unwrap()),
+            }),
+            TAG_FLOAT => Scalar::Float(match vw {
+                0 => f32::from_le_bytes(d[p..p + 4].try_into().unwrap()) as f64,
+                _ => f64::from_le_bytes(d[p..p + 8].try_into().unwrap()),
+            }),
+            TAG_STRING => {
+                let len = u32::from_le_bytes(d[p..p + 4].try_into().unwrap()) as usize;
+                Scalar::Str(std::str::from_utf8(&d[p + 4..p + 4 + len]).unwrap_or(""))
+            }
+            _ => Scalar::Other,
+        })
+    }
+
     /// Several properties in one pass: `out[j]` = `keys[j]`; unset slots stay `None`.
     pub fn get_multi(&self, keys: &[PropertyKeyId], out: &mut [Option<PropertyValue>]) {
         for slot in out.iter_mut() {
@@ -226,6 +279,76 @@ impl CompactPropertyStore {
                 let _ = key_size; // silence unused warning
             }
             skip_value(data, &mut pos, meta);
+        }
+    }
+
+    /// Pushes `key`'s value into `sink` (a null when absent): scalars without a
+    /// `PropertyValue`, strings copied once.
+    pub fn get_into(&self, key: PropertyKeyId, sink: &mut dyn ColumnSink) {
+        match self.find_entry(key) {
+            Some((offset, _)) => {
+                let meta = self.data[offset];
+                let tag = meta & 0x0F;
+                let kw = (meta >> 4) & 0x03;
+                let vw = (meta >> 6) & 0x03;
+                let mut pos = offset + 1;
+                let _ = read_key_id(&self.data, &mut pos, kw);
+                decode_into(&self.data, &mut pos, tag, vw, sink);
+            }
+            None => sink.push_null(),
+        }
+    }
+
+    /// Pushes every `keys[j]` value into `sinks[j]` in one pass over the entries: exactly one
+    /// push per sink, a null for a key the store lacks.
+    pub fn get_multi_into(&self, keys: &[PropertyKeyId], sinks: &mut [&mut dyn ColumnSink]) {
+        let nk = keys.len();
+        debug_assert_eq!(nk, sinks.len());
+        if nk == 0 {
+            return;
+        }
+        if self.count == 0 {
+            for s in sinks.iter_mut() {
+                s.push_null();
+            }
+            return;
+        }
+        // small key sets: a stack bitmap of the keys seen so far
+        let mut seen = [false; 16];
+        let mut seen_heap: Vec<bool> = if nk > 16 { vec![false; nk] } else { Vec::new() };
+        let seen: &mut [bool] = if nk > 16 {
+            &mut seen_heap
+        } else {
+            &mut seen[..nk]
+        };
+        let data = &self.data;
+        let len = data.len();
+        let mut pos = 0;
+        let mut remaining = nk;
+        for _ in 0..self.count {
+            if pos >= len || remaining == 0 {
+                break;
+            }
+            let meta = data[pos];
+            pos += 1;
+            let kw = (meta >> 4) & 0x03;
+            let kid = read_key_id(data, &mut pos, kw);
+            if let Some(j) = keys.iter().position(|k| k.0 == kid)
+                && !seen[j]
+            {
+                let tag = meta & 0x0F;
+                let vw = (meta >> 6) & 0x03;
+                decode_into(data, &mut pos, tag, vw, sinks[j]);
+                seen[j] = true;
+                remaining -= 1;
+            } else {
+                skip_value(data, &mut pos, meta);
+            }
+        }
+        for (j, s) in sinks.iter_mut().enumerate() {
+            if !seen[j] {
+                s.push_null();
+            }
         }
     }
 
@@ -817,6 +940,63 @@ fn decode_value(data: &[u8], pos: &mut usize) -> PropertyValue {
     let tag = meta & 0x0F;
     let vw = (meta >> 6) & 0x03;
     decode_value_by_tag(data, pos, tag, vw)
+}
+
+/// Decodes the value at `pos` into `sink`: scalars straight from the bytes, the structured
+/// types through [`decode_value_by_tag`].
+fn decode_into(data: &[u8], pos: &mut usize, tag: u8, vw: u8, sink: &mut dyn ColumnSink) {
+    match tag {
+        TAG_NULL => sink.push_null(),
+        TAG_BOOL_FALSE => sink.push_bool(false),
+        TAG_BOOL_TRUE => sink.push_bool(true),
+        TAG_INT => {
+            let v = match vw {
+                0 => {
+                    let v = data[*pos] as i8 as i64;
+                    *pos += 1;
+                    v
+                }
+                1 => {
+                    let v = i16::from_le_bytes([data[*pos], data[*pos + 1]]) as i64;
+                    *pos += 2;
+                    v
+                }
+                2 => {
+                    let v = i32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap()) as i64;
+                    *pos += 4;
+                    v
+                }
+                _ => {
+                    let v = i64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap());
+                    *pos += 8;
+                    v
+                }
+            };
+            sink.push_int(v);
+        }
+        TAG_FLOAT => {
+            let v = match vw {
+                0 => {
+                    let v = f32::from_le_bytes(data[*pos..*pos + 4].try_into().unwrap()) as f64;
+                    *pos += 4;
+                    v
+                }
+                _ => {
+                    let v = f64::from_le_bytes(data[*pos..*pos + 8].try_into().unwrap());
+                    *pos += 8;
+                    v
+                }
+            };
+            sink.push_float(v);
+        }
+        TAG_STRING => {
+            let len = read_u32_le(data, pos) as usize;
+            let s = std::str::from_utf8(&data[*pos..*pos + len]).unwrap_or("");
+            *pos += len;
+            sink.push_str(s);
+        }
+        _ => sink.push_value(decode_value_by_tag(data, pos, tag, vw)),
+    }
 }
 
 /// Decodes a value from its type tag and width hint.

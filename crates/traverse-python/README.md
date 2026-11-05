@@ -23,6 +23,7 @@ with traverse.open("people.tvdb") as db:
 
     result = db.execute("MATCH (p:Person) WHERE p.age > $age RETURN p.name AS name", {"age": 30})
     print(result.columns, result.data())  # ['name'] [{'name': 'Alice'}]
+    print(result.values())  # [('Alice',)]: rows as tuples, the cheapest read of a whole result
 
     # ISO/IEC 39075 GQL instead of openCypher
     for row in db.execute("MATCH (p:Person) FILTER p.age < 30 RETURN p.name AS name", dialect="gql"):

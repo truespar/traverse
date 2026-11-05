@@ -119,6 +119,29 @@ impl OwnedWriteTx {
         self.tx.set_skip_redo();
     }
 
+    /// See [`WriteTx::bulk_nodes`].
+    pub(crate) fn bulk_nodes(
+        &mut self,
+        labels: &[&str],
+        props: Vec<crate::graph::property::PropertyMap>,
+    ) -> crate::error::Result<crate::graph::types::NodeId> {
+        self.tx.bulk_nodes(labels, props)
+    }
+
+    /// See [`WriteTx::bulk_edges`].
+    pub(crate) fn bulk_edges(
+        &mut self,
+        edge_type: &str,
+        pairs: &[(crate::graph::types::NodeId, crate::graph::types::NodeId)],
+    ) -> crate::error::Result<crate::graph::types::EdgeId> {
+        self.tx.bulk_edges(edge_type, pairs)
+    }
+
+    /// See [`WriteTx::set_bulk`].
+    pub(crate) fn set_bulk(&mut self, on: bool) {
+        self.tx.set_bulk(on);
+    }
+
     /// See [`WriteTx::commit_snapshotted`].
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn commit_snapshotted(self) -> HybridTimestamp {

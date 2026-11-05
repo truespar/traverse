@@ -1,37 +1,24 @@
 use traverse_core::tx::view::GraphView;
-use traverse_cypher::executor::materialize_value;
-use traverse_cypher::frame::SlotValue;
-use traverse_cypher::types::CypherValue;
+use traverse_cypher::executor::{LaneRow, materialize_value};
+use traverse_cypher::vex::vector::ValueRef;
 
 use crate::bolt_type::cypher_value_to_packstream;
 
 use super::value::Value;
 
-// -- zero-alloc record encoding from raw frame slots -----------------
+// -- record encoding straight from typed lanes ------------------------
 
-/// Encodes a Bolt Record message straight from frame slots, skipping the intermediate
-/// `Vec<CypherValue>` and `Vec<Value>`. Scalar columns (Integer, Float, Bool, Null, String)
-/// allocate
-/// nothing; complex types (NodeRef, EdgeRef, ...) fall back to materialize ->
+/// Encodes a Bolt Record message straight from a result row's typed lanes, skipping the
+/// intermediate `Vec<CypherValue>` and `Vec<Value>`. Scalar lanes (Null, Bool, Integer, Float,
+/// String) allocate nothing; entities and nested values materialize, then go through
 /// cypher_value_to_packstream -> encode_value.
-pub fn encode_record_from_slots(
-    buf: &mut Vec<u8>,
-    frame: &[SlotValue],
-    slot_indices: &[Option<usize>],
-    graph: &dyn GraphView,
-    bolt_major: u8,
-) {
+pub fn encode_record(buf: &mut Vec<u8>, row: &LaneRow<'_>, graph: &dyn GraphView, bolt_major: u8) {
     // Record = Structure(tag=0x71, 1 field)
     buf.push(0xB1);
     buf.push(0x71);
-    // list header for N columns
-    encode_list_header(buf, slot_indices.len());
-    // each column value
-    for slot_idx in slot_indices {
-        match slot_idx {
-            Some(idx) => encode_slot_value(buf, &frame[*idx], graph, bolt_major),
-            None => buf.push(0xC0), // Null
-        }
+    encode_list_header(buf, row.len());
+    for c in 0..row.len() {
+        encode_lane(buf, row.get(c), graph, bolt_major);
     }
 }
 
@@ -52,38 +39,27 @@ fn encode_list_header(buf: &mut Vec<u8>, len: usize) {
     }
 }
 
-/// One SlotValue to PackStream bytes. Hot (0 allocs): Null, Bool, Integer, Float. Warm (0 allocs):
-/// Heap(String). Cold (allocates): NodeRef, EdgeRef, SingleHopPath, Heap(other).
+/// One lane to PackStream bytes. Hot (0 allocs): Null, Bool, Int, Float, Str. Cold (allocates):
+/// nodes, relationships and nested values.
 #[inline]
-fn encode_slot_value(buf: &mut Vec<u8>, sv: &SlotValue, graph: &dyn GraphView, bolt_major: u8) {
-    match sv {
-        SlotValue::Null => buf.push(0xC0),
-        SlotValue::Bool(false) => buf.push(0xC2),
-        SlotValue::Bool(true) => buf.push(0xC3),
-        SlotValue::Integer(n) => encode_integer(buf, *n),
-        SlotValue::Float(f) => {
+fn encode_lane(buf: &mut Vec<u8>, v: ValueRef<'_>, graph: &dyn GraphView, bolt_major: u8) {
+    match v {
+        ValueRef::Null => buf.push(0xC0),
+        ValueRef::Bool(false) => buf.push(0xC2),
+        ValueRef::Bool(true) => buf.push(0xC3),
+        ValueRef::Int(n) => encode_integer(buf, n),
+        ValueRef::Float(f) => {
             buf.push(0xC1);
             buf.extend_from_slice(&f.to_bits().to_be_bytes());
         }
-        SlotValue::Heap(boxed) => match boxed.as_ref() {
-            CypherValue::String(s) => encode_string(buf, s),
-            CypherValue::Integer(n) => encode_integer(buf, *n),
-            CypherValue::Float(f) => {
-                buf.push(0xC1);
-                buf.extend_from_slice(&f.to_bits().to_be_bytes());
-            }
-            CypherValue::Bool(b) => buf.push(if *b { 0xC3 } else { 0xC2 }),
-            CypherValue::Null => buf.push(0xC0),
-            other => {
-                // cold path: materialize, encode via the generic path
-                let cv = materialize_value(other.clone(), graph);
-                let pv = cypher_value_to_packstream(&cv, bolt_major);
-                encode_value(buf, &pv);
-            }
-        },
-        // cold path: SlotValue -> CypherValue -> materialize -> PackStream
-        _ => {
-            let cv = materialize_value(sv.to_cypher_value(), graph);
+        ValueRef::Str(s) => encode_string(buf, s),
+        ValueRef::Node(_) | ValueRef::Edge { .. } => {
+            let cv = materialize_value(v.to_owned(), graph);
+            let pv = cypher_value_to_packstream(&cv, bolt_major);
+            encode_value(buf, &pv);
+        }
+        ValueRef::Any(cv) => {
+            let cv = materialize_value(cv.clone(), graph);
             let pv = cypher_value_to_packstream(&cv, bolt_major);
             encode_value(buf, &pv);
         }

@@ -263,7 +263,8 @@ fn flip_cmp_op(op: CmpOp) -> CmpOp {
 /// * a positive `__has_label(var, 'L')` conjunct fills `Scan.label`;
 /// * else a conjunct that's a pure OR of positive `__has_label` leaves becomes a
 ///   deduplicating Union of per-label scans (a node with several of the labels
-///   binds once).
+///   binds once) under the predicate, each scan filtered by the predicate's constant property
+///   equalities so one can become that label's index seek.
 pub fn push_label_filters_into_scan(plan: LogicalPlan) -> LogicalPlan {
     recurse_transform(plan, &push_label_filters_into_scan_inner)
 }
@@ -306,6 +307,21 @@ fn push_label_filters_into_scan_inner(plan: LogicalPlan) -> LogicalPlan {
         }
         None
     }
+    /// `var.p = c` (either side) with `c` a literal or parameter.
+    fn is_property_eq_constant(e: &Expr, var: &str) -> bool {
+        let Expr::Comparison(lhs, ops) = e else {
+            return false;
+        };
+        let [(CmpOp::Eq, rhs)] = ops.as_slice() else {
+            return false;
+        };
+        let prop = |e: &Expr| match e {
+            Expr::Property(base, _) => matches!(&**base, Expr::Variable(v) if v == var),
+            _ => false,
+        };
+        let constant = |e: &Expr| matches!(e, Expr::Literal(_) | Expr::Parameter(_));
+        (prop(lhs) && constant(rhs)) || (prop(rhs) && constant(lhs))
+    }
     #[recursive::recursive]
     fn or_labels(e: &Expr, var: &str, out: &mut Vec<String>) -> bool {
         match e {
@@ -339,9 +355,26 @@ fn push_label_filters_into_scan_inner(plan: LogicalPlan) -> LogicalPlan {
         if or_labels(c, &variable, &mut alts) && alts.len() >= 2 {
             alts.sort();
             alts.dedup();
-            let mut scans = alts.into_iter().map(|l| LogicalPlan::Scan {
-                variable: variable.clone(),
-                label: Some(l),
+            // each scan keeps the constant property equalities (pure: a node of two of the labels
+            // may pass them twice), so one can become that label's index seek; the whole
+            // predicate is checked once per node above the union
+            let eqs = parts
+                .iter()
+                .filter(|c| is_property_eq_constant(c, &variable))
+                .map(|c| (*c).clone())
+                .reduce(|a, b| Expr::BinaryOp(Box::new(a), BinOp::And, Box::new(b)));
+            let mut scans = alts.into_iter().map(|l| {
+                let scan = LogicalPlan::Scan {
+                    variable: variable.clone(),
+                    label: Some(l),
+                };
+                match &eqs {
+                    Some(eqs) => LogicalPlan::Filter {
+                        input: Box::new(scan),
+                        predicate: eqs.clone(),
+                    },
+                    None => scan,
+                }
             });
             let mut union = scans.next().expect("len >= 2");
             for s in scans {

@@ -294,13 +294,16 @@ impl GraphAlgorithm for GraphSage {
                                 row[j] += current_ref[uo + j];
                             }
                         });
-                        graph.for_each_in(v, &mut |u, _eid, _w| {
-                            count += 1;
-                            let uo = u.0 as usize * d;
-                            for j in 0..d {
-                                row[j] += current_ref[uo + j];
-                            }
-                        });
+                        // an undirected projection lists both directions as out already
+                        if !graph.is_undirected() {
+                            graph.for_each_in(v, &mut |u, _eid, _w| {
+                                count += 1;
+                                let uo = u.0 as usize * d;
+                                for j in 0..d {
+                                    row[j] += current_ref[uo + j];
+                                }
+                            });
+                        }
                     }
                 }
                 let inv = 1.0 / count as f32;

@@ -5,13 +5,13 @@
 
 use std::sync::Arc;
 
-use rustc_hash::FxHashSet;
 use smallvec::SmallVec;
 
 use super::Graph;
 use super::constraint::{ConstraintDescriptor, ConstraintEntity, ConstraintType};
 use super::property::{IndexKey, InternedPropertyMap, PropertyValue};
 use super::stats::GraphStatistics;
+use super::table::IdSet;
 use super::types::{EdgeId, EdgeTypeId, LabelId, NodeId, PropertyKeyId};
 use crate::error::{Error, Result};
 use crate::tx::versions::{EdgeGhost, NodeGhost, Versions};
@@ -30,13 +30,13 @@ impl Graph {
 
     /// Nodes with `label` now.
     #[inline]
-    pub(crate) fn label_members(&self, label: LabelId) -> Option<&FxHashSet<NodeId>> {
+    pub(crate) fn label_members(&self, label: LabelId) -> Option<&IdSet<NodeId>> {
         self.label_index.get(&label)
     }
 
     /// Edges of `edge_type` now.
     #[inline]
-    pub(crate) fn type_members(&self, edge_type: EdgeTypeId) -> Option<&FxHashSet<EdgeId>> {
+    pub(crate) fn type_members(&self, edge_type: EdgeTypeId) -> Option<&IdSet<EdgeId>> {
         self.edge_type_index.get(&edge_type)
     }
 
@@ -153,6 +153,8 @@ impl Graph {
         let old_labels = std::mem::replace(&mut node.labels, labels);
         node.properties = properties;
         let new_labels = node.labels.clone();
+        self.unlabeled = self.unlabeled + usize::from(new_labels.is_empty())
+            - usize::from(old_labels.is_empty());
         for l in &old_labels {
             if !new_labels.contains(l)
                 && let Some(set) = self.label_index.get_mut(l)

@@ -214,12 +214,13 @@ impl GraphAlgorithm for Betweenness {
                 1.0
             } else {
                 let denom = (n - 1.0) * (n - 2.0);
-                // the projection doesn't say whether the graph was treated as undirected
-                // (for_each_out / for_each_in reflect it). The directed scale (1/denom) fits
-                // natural orientation; with `orientation: UNDIRECTED` the BFS counts both sides,
-                // doubling sigma_st, so the factor 2 is already in
+                // the directed scale 1/denom: undirected, every pair is counted from both ends,
+                // which is the undirected scale's factor 2 already
                 1.0 / denom
             }
+        } else if graph.is_undirected() {
+            // every pair counted from both ends: once, as in GDS (and NetworkX)
+            0.5
         } else {
             1.0
         };

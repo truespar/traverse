@@ -14,13 +14,13 @@
 //! # Implementation
 //!
 //! Same pull-style Jacobi loop as PageRank (see `pagerank.rs`: no atomic f64,
-//! disjoint writes per task). Only the per-edge denominator differs, and there's
-//! no dangling redistribution (`+ avg_deg` already handles low-degree nodes).
+//! disjoint writes per task, shares computed once per step). Only the share's
+//! denominator differs, and there's no dangling redistribution (`+ avg_deg`
+//! already handles low-degree nodes).
 
 use std::collections::BTreeMap;
 
 use rayon::prelude::*;
-use traverse_core::graph::types::NodeId;
 
 use crate::types::CypherValue;
 
@@ -135,64 +135,60 @@ impl GraphAlgorithm for ArticleRank {
         let avg_deg = sum_deg / n_active as f64;
 
         let mut scores: Vec<f64> = vec![0.0; cap];
+        let mut new_scores: Vec<f64> = vec![0.0; cap];
+        // what each node passes along each out-relationship, score / (out-degree + average)
+        let mut share: Vec<f64> = vec![0.0; cap];
+        let mut active: Vec<bool> = vec![false; cap];
         for &n in &nodes {
             scores[n.0 as usize] = 1.0 - cfg.damping;
+            active[n.0 as usize] = true;
         }
-        let mut new_scores: Vec<f64> = vec![0.0; cap];
+        let denom: Vec<f64> = out_deg.iter().map(|&od| od + avg_deg).collect();
 
         let d = cfg.damping;
         let one_minus_d = 1.0 - d;
+        let chunk = super::node_chunk(cap);
+        let in_neighbors = super::InNeighbors::new(graph, cap);
 
-        // active mask for direct par_chunks_mut writes (no Vec<(usize, f64)> intermediate)
-        let mut active_mask: Vec<bool> = vec![false; cap];
-        for &n in &nodes {
-            active_mask[n.0 as usize] = true;
-        }
+        // on a pool worker, as PageRank's steps
+        rayon::scope(|_| -> Result<(), AlgorithmError> {
+            for _ in 0..cfg.max_iterations {
+                cancel.check()?;
 
-        for _ in 0..cfg.max_iterations {
-            cancel.check()?;
-
-            let scores_ref: &[f64] = &scores;
-            let out_deg_ref: &[f64] = &out_deg;
-            let active_mask_ref: &[bool] = &active_mask;
-            new_scores
-                .par_chunks_mut(1)
-                .enumerate()
-                .for_each(|(idx, slot)| {
-                    if !active_mask_ref[idx] {
-                        slot[0] = 0.0;
-                        return;
-                    }
-                    let v = NodeId(idx as u64);
-                    let mut acc = 0.0;
-                    if let Some(slice) = graph.incoming_adj_slice(v) {
-                        for ep in slice {
-                            let ui = ep.neighbor().0 as usize;
-                            let denom = out_deg_ref[ui] + avg_deg;
-                            if denom > 0.0 {
-                                acc += scores_ref[ui] / denom;
-                            }
+                share
+                    .par_chunks_mut(chunk)
+                    .zip(scores.par_chunks(chunk))
+                    .zip(denom.par_chunks(chunk))
+                    .for_each(|((share, scores), denom)| {
+                        for ((s, &x), &dn) in share.iter_mut().zip(scores).zip(denom) {
+                            *s = if dn > 0.0 { x / dn } else { 0.0 };
                         }
-                    } else {
-                        graph.for_each_in(v, &mut |u, _eid, _w| {
-                            let denom = out_deg_ref[u.0 as usize] + avg_deg;
-                            if denom > 0.0 {
-                                acc += scores_ref[u.0 as usize] / denom;
-                            }
-                        });
-                    }
-                    slot[0] = one_minus_d + d * acc;
-                });
+                    });
 
-            let delta: f64 = nodes
-                .par_iter()
-                .map(|&n| (new_scores[n.0 as usize] - scores[n.0 as usize]).abs())
-                .sum();
-            std::mem::swap(&mut scores, &mut new_scores);
-            if delta < cfg.tolerance {
-                break;
+                let (scores_ref, share_ref, active_ref, in_neighbors) =
+                    (&scores, &share, &active, &in_neighbors);
+                let delta: f64 = new_scores
+                    .par_chunks_mut(chunk)
+                    .enumerate()
+                    .map(|(c, slots)| {
+                        let first = c * chunk;
+                        let mut change = 0.0;
+                        let range = first..first + slots.len();
+                        in_neighbors.sums(share_ref, active_ref, range, |i, acc| {
+                            let s = one_minus_d + d * acc;
+                            change += (s - scores_ref[i]).abs();
+                            slots[i - first] = s;
+                        });
+                        change
+                    })
+                    .sum();
+                std::mem::swap(&mut scores, &mut new_scores);
+                if delta < cfg.tolerance {
+                    break;
+                }
             }
-        }
+            Ok(())
+        })?;
 
         let mut out = vec![f64::NAN; cap];
         for &n in &nodes {

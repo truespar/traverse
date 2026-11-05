@@ -10,6 +10,8 @@ use crate::error::{Error, Result};
 use crate::interner::StringTable;
 use crate::tx::view::GraphView;
 
+use super::batch::{AdjBatch, ColumnBound, ColumnCmp, ColumnSink};
+use super::columns::Entity;
 use super::constraint::{ConstraintRegistry, ConstraintType};
 use super::edge::Edge;
 use super::index::{EdgeIndexCatalog, IndexCatalog};
@@ -87,7 +89,7 @@ impl GraphView for Graph {
             return Vec::new();
         };
         match self.edge_type_index.get(&EdgeTypeId(raw)) {
-            Some(set) => set.iter().copied().collect(),
+            Some(set) => set.to_vec(),
             None => Vec::new(),
         }
     }
@@ -135,6 +137,102 @@ impl GraphView for Graph {
     ) -> Result<()> {
         Graph::batch_read_node_properties_i64(self, node_ids, keys, out_vals, out_valid);
         Ok(())
+    }
+
+    fn gather_node_props(
+        &self,
+        ids: &[NodeId],
+        keys: &[PropertyKeyId],
+        sinks: &mut [&mut dyn ColumnSink],
+    ) -> Result<usize> {
+        Ok(Graph::gather_node_props(self, ids, keys, sinks))
+    }
+
+    fn gather_edge_props(
+        &self,
+        ids: &[EdgeId],
+        keys: &[PropertyKeyId],
+        sinks: &mut [&mut dyn ColumnSink],
+    ) -> Result<usize> {
+        Ok(Graph::gather_edge_props(self, ids, keys, sinks))
+    }
+
+    fn nodes_exist(&self, ids: &[NodeId], out: &mut Vec<bool>) {
+        out.clear();
+        out.extend(ids.iter().map(|id| self.nodes.contains_key(id)));
+    }
+
+    fn edges_exist(&self, ids: &[EdgeId], out: &mut Vec<bool>) {
+        out.clear();
+        out.extend(ids.iter().map(|&id| self.has_edge(id)));
+    }
+
+    fn nodes_have_label(&self, ids: &[NodeId], label: LabelId, out: &mut Vec<bool>) {
+        out.clear();
+        match self.label_index.get(&label) {
+            Some(set) => out.extend(ids.iter().map(|id| set.contains(id))),
+            None => out.resize(ids.len(), false),
+        }
+    }
+
+    fn count_nodes_by_label(&self, label: &str) -> usize {
+        self.strings
+            .get(label)
+            .and_then(|raw| self.label_index.get(&LabelId(raw)))
+            .map_or(0, |s| s.len())
+    }
+
+    fn count_edges_by_type(&self, edge_type: &str) -> usize {
+        self.strings
+            .get(edge_type)
+            .and_then(|raw| self.edge_type_index.get(&EdgeTypeId(raw)))
+            .map_or(0, |s| s.len())
+    }
+
+    fn count_index_lookup(&self, label: &str, prop: &str, value: &IndexKey) -> Option<usize> {
+        let lid = LabelId(self.strings.get(label)?);
+        let pkid = PropertyKeyId(self.strings.get(prop)?);
+        Some(self.indexes.get_index(lid, pkid)?.lookup_count(value))
+    }
+
+    fn count_index_range(
+        &self,
+        label: &str,
+        prop: &str,
+        lower: std::ops::Bound<IndexKey>,
+        upper: std::ops::Bound<IndexKey>,
+    ) -> Option<usize> {
+        let lid = LabelId(self.strings.get(label)?);
+        let pkid = PropertyKeyId(self.strings.get(prop)?);
+        Some(
+            self.indexes
+                .get_index(lid, pkid)?
+                .range_count(lower.as_ref(), upper.as_ref()),
+        )
+    }
+
+    fn index_range_estimate(
+        &self,
+        label: &str,
+        prop: &str,
+        lower: &std::ops::Bound<IndexKey>,
+        upper: &std::ops::Bound<IndexKey>,
+    ) -> Option<f64> {
+        let lid = LabelId(self.strings.get(label)?);
+        let pkid = PropertyKeyId(self.strings.get(prop)?);
+        self.indexes
+            .get_index(lid, pkid)?
+            .range_estimate(lower.as_ref(), upper.as_ref())
+    }
+
+    fn expand_batch(
+        &self,
+        srcs: &[NodeId],
+        dir: Direction,
+        type_filter: &Option<FxHashSet<EdgeTypeId>>,
+        out: &mut AdjBatch,
+    ) -> Result<()> {
+        Graph::expand_batch(self, srcs, dir, type_filter, out)
     }
 
     fn edges_with_neighbor(
@@ -196,6 +294,42 @@ impl GraphView for Graph {
 
     fn degree(&self, node: NodeId, dir: Direction) -> Result<usize> {
         Graph::degree(self, node, dir)
+    }
+
+    fn degrees(&self, ids: &[NodeId], dir: Direction, out: &mut Vec<usize>) {
+        out.clear();
+        out.extend(
+            ids.iter()
+                .map(|&n| Graph::degree(self, n, dir).unwrap_or(0)),
+        );
+    }
+
+    fn label_bitmap(&self, label: &str) -> Option<Vec<u64>> {
+        Graph::label_bitmap(self, label)
+    }
+
+    fn self_loops(&self) -> Option<usize> {
+        Some(Graph::self_loop_count(self))
+    }
+
+    fn count_nodes_where(
+        &self,
+        label: &str,
+        prop: &str,
+        cmp: ColumnCmp,
+        bound: &ColumnBound,
+    ) -> Option<usize> {
+        Graph::count_nodes_where(self, label, prop, cmp, bound)
+    }
+
+    fn nodes_where(
+        &self,
+        label: &str,
+        prop: &str,
+        cmp: ColumnCmp,
+        bound: &ColumnBound,
+    ) -> Option<Vec<NodeId>> {
+        Graph::nodes_where(self, label, prop, cmp, bound)
     }
 
     fn strings(&self) -> &StringTable {
@@ -316,6 +450,14 @@ impl GraphView for Graph {
         let Some(node) = self.nodes.get(&id) else {
             return;
         };
+        let i = id.0 as usize;
+        self.columns.refresh_key(
+            Entity::Node,
+            i,
+            pkid,
+            &node.properties,
+            i < self.nodes.prefix_len(),
+        );
         let Some(ik) = node
             .properties
             .get(pkid)
@@ -365,6 +507,14 @@ impl GraphView for Graph {
             return;
         };
         let type_id = edge.edge_type;
+        let i = id.0 as usize;
+        self.columns.refresh_key(
+            Entity::Edge,
+            i,
+            pkid,
+            &edge.properties,
+            i < self.edge_prefix(),
+        );
         let Some(ik) = edge
             .properties
             .get(pkid)
@@ -463,6 +613,14 @@ impl GraphView for Graph {
 
     fn index_lookup(&self, label: &str, prop: &str, value: &IndexKey) -> Option<Vec<NodeId>> {
         Graph::index_lookup(self, label, prop, value)
+    }
+
+    fn property_seek(&self, prop: &str, value: &IndexKey) -> Option<Vec<NodeId>> {
+        Graph::property_seek(self, prop, value)
+    }
+
+    fn property_seek_covers(&self, prop: &str) -> bool {
+        Graph::property_seek_covers(self, prop)
     }
 
     fn index_range_lookup(

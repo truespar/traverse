@@ -27,7 +27,7 @@ export const useConnectionStore = defineStore('connection', () => {
   // with (`ai_provider`), which health reports as `ai`. The browser build
   // has none.
   const aiChatAvailable = computed(
-    () => api.capabilities.aiChat && features.value.ai === true,
+    () => api.capabilities.aiChat && (isWasmMode.value || features.value.ai === true),
   )
 
   // OPFS usage (WASM only). Polled alongside health so the header

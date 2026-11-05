@@ -21,7 +21,6 @@ pub mod apoc_log;
 pub mod apoc_scheduler;
 pub(crate) mod apoc_trigger;
 pub mod ast;
-pub(crate) mod bytecode;
 // the language bindings' file-bound databases, so not on wasm32
 #[cfg(not(target_arch = "wasm32"))]
 pub mod embedded;
@@ -32,12 +31,12 @@ pub mod functions;
 pub(crate) mod gds_catalog;
 pub mod lexer;
 pub mod memory;
-pub(crate) mod operators;
 pub mod optimizer;
 pub mod parser;
 pub mod plan_cache;
 pub mod planner;
 pub mod procedure;
+pub(crate) mod procedures;
 pub mod query;
 pub mod session;
 pub mod settings;
@@ -49,6 +48,7 @@ pub mod temporal;
 pub mod transactions;
 pub mod types;
 pub mod validate;
+pub mod vex;
 pub(crate) mod xml;
 
 pub mod algorithms;
@@ -73,6 +73,8 @@ use types::CypherValue;
 pub struct PreparedQuery {
     /// Optimized logical plan.
     pub plan: planner::LogicalPlan,
+    /// The compiled plan the engine runs.
+    pub physical: std::sync::Arc<vex::plan::PhysicalPlan>,
     /// Output column names.
     pub columns: Vec<String>,
     /// Classified query type.
@@ -184,15 +186,16 @@ fn execute_inner(graph: &mut dyn GraphView, query: &str) -> Result<CypherResult,
         // `stack`)
         stack::run_deep_plan(plan, |plan| {
             let plan = optimizer::optimize(plan, graph, &hints);
+            let physical = vex::plan::compile(&plan, &*graph)?;
             match stmt.mode {
-                QueryMode::Explain => Ok(make_explain_result(&plan)),
+                QueryMode::Explain => Ok(make_explain_result(&physical)),
                 QueryMode::Profile => {
-                    let plan_cv = executor::plan_to_cypher_value(&plan);
-                    let mut result = execute_plan_with_triggers(&plan, graph)?;
+                    let plan_cv = executor::plan_to_cypher_value(&physical);
+                    let mut result = execute_plan_with_triggers(&physical, graph)?;
                     result.plan = Some(plan_cv);
                     Ok(result)
                 }
-                QueryMode::Normal => execute_plan_with_triggers(&plan, graph),
+                QueryMode::Normal => execute_plan_with_triggers(&physical, graph),
             }
         })
     })
@@ -231,15 +234,16 @@ fn execute_with_params_inner(
             let plan = planner::plan_statement_with_hints(&stmt, &hints)?;
             stack::run_deep_plan(plan, |plan| {
                 let plan = optimizer::optimize(plan, graph, &hints);
+                let physical = vex::plan::compile(&plan, &*graph)?;
                 match stmt.mode {
-                    QueryMode::Explain => Ok(make_explain_result(&plan)),
+                    QueryMode::Explain => Ok(make_explain_result(&physical)),
                     QueryMode::Profile => {
-                        let plan_cv = executor::plan_to_cypher_value(&plan);
-                        let mut result = execute_plan_with_triggers(&plan, graph)?;
+                        let plan_cv = executor::plan_to_cypher_value(&physical);
+                        let mut result = execute_plan_with_triggers(&physical, graph)?;
                         result.plan = Some(plan_cv);
                         Ok(result)
                     }
-                    QueryMode::Normal => execute_plan_with_triggers(&plan, graph),
+                    QueryMode::Normal => execute_plan_with_triggers(&physical, graph),
                 }
             })
         })
@@ -278,19 +282,20 @@ pub fn execute_statement_with_params_timed(
         let plan = planner::plan_statement_with_hints(&stmt, &hints)?;
         stack::run_deep_plan(plan, |plan| {
             let plan = optimizer::optimize(plan, graph, &hints);
+            let physical = vex::plan::compile(&plan, &*graph)?;
             let plan_dur = t1.elapsed();
 
             // phase 3: execute
             let t2 = Instant::now();
             let result = match stmt.mode {
-                QueryMode::Explain => Ok(make_explain_result(&plan)),
+                QueryMode::Explain => Ok(make_explain_result(&physical)),
                 QueryMode::Profile => {
-                    let plan_cv = executor::plan_to_cypher_value(&plan);
-                    let mut result = execute_plan_with_triggers(&plan, graph)?;
+                    let plan_cv = executor::plan_to_cypher_value(&physical);
+                    let mut result = execute_plan_with_triggers(&physical, graph)?;
                     result.plan = Some(plan_cv);
                     Ok(result)
                 }
-                QueryMode::Normal => execute_plan_with_triggers(&plan, graph),
+                QueryMode::Normal => execute_plan_with_triggers(&physical, graph),
             }?;
             let exec_dur = t2.elapsed();
 
@@ -339,19 +344,20 @@ fn execute_with_params_timed_inner(
             let plan = planner::plan_statement_with_hints(&stmt, &hints)?;
             stack::run_deep_plan(plan, |plan| {
                 let plan = optimizer::optimize(plan, graph, &hints);
+                let physical = vex::plan::compile(&plan, &*graph)?;
                 let plan_dur = t1.elapsed();
 
                 // phase 3: execute
                 let t2 = Instant::now();
                 let result = match stmt.mode {
-                    QueryMode::Explain => Ok(make_explain_result(&plan)),
+                    QueryMode::Explain => Ok(make_explain_result(&physical)),
                     QueryMode::Profile => {
-                        let plan_cv = executor::plan_to_cypher_value(&plan);
-                        let mut result = execute_plan_with_triggers(&plan, graph)?;
+                        let plan_cv = executor::plan_to_cypher_value(&physical);
+                        let mut result = execute_plan_with_triggers(&physical, graph)?;
                         result.plan = Some(plan_cv);
                         Ok(result)
                     }
-                    QueryMode::Normal => execute_plan_with_triggers(&plan, graph),
+                    QueryMode::Normal => execute_plan_with_triggers(&physical, graph),
                 }?;
                 let exec_dur = t2.elapsed();
 
@@ -390,10 +396,12 @@ fn prepare_query_inner(
         let hints = build_index_hints(graph);
         let plan = planner::plan_statement_with_hints(&stmt, &hints)?;
         let plan = optimizer::optimize(plan, graph, &hints);
-        let columns = executor::plan_columns(&plan);
+        let physical = vex::plan::compile(&plan, &*graph)?;
+        let columns: Vec<String> = physical.columns.iter().map(|(n, _)| n.clone()).collect();
         let query_type = executor::classify_plan(&plan);
         Ok(PreparedQuery {
             plan,
+            physical: std::sync::Arc::new(physical),
             columns,
             query_type,
             mode: stmt.mode,
@@ -434,13 +442,15 @@ fn prepare_query_timed_inner(
         let hints = build_index_hints(graph);
         let plan = planner::plan_statement_with_hints(&stmt, &hints)?;
         let plan = optimizer::optimize(plan, graph, &hints);
-        let columns = executor::plan_columns(&plan);
+        let physical = vex::plan::compile(&plan, &*graph)?;
+        let columns: Vec<String> = physical.columns.iter().map(|(n, _)| n.clone()).collect();
         let query_type = executor::classify_plan(&plan);
         let planning_time = plan_start.elapsed();
 
         Ok((
             PreparedQuery {
                 plan,
+                physical: std::sync::Arc::new(physical),
                 columns,
                 query_type,
                 mode: stmt.mode,
@@ -458,8 +468,22 @@ impl Drop for PreparedQuery {
     /// `stack`).
     fn drop(&mut self) {
         let plan = std::mem::replace(&mut self.plan, planner::LogicalPlan::EmptyRow);
-        let depth = stack::plan_depth(&plan);
-        stack::with_stack_for_depth(depth, move || drop(plan));
+        let physical = std::mem::replace(
+            &mut self.physical,
+            std::sync::Arc::new(vex::plan::PhysicalPlan::empty()),
+        );
+        let depth = stack::plan_depth(&plan).max(physical.depth);
+        stack::with_stack_for_depth(depth, move || {
+            drop(plan);
+            drop(physical);
+        });
+    }
+}
+
+impl PreparedQuery {
+    /// The plan as a value, for EXPLAIN and PROFILE.
+    pub fn plan_value(&self) -> CypherValue {
+        executor::plan_to_cypher_value(&self.physical)
     }
 }
 
@@ -483,17 +507,17 @@ pub(crate) fn execute_prepared_shared(
     let _pm_guard = (prepared.path_mode != ast::PathMode::Trail)
         .then(|| session::set_path_mode(prepared.path_mode));
     let result = match prepared.mode {
-        QueryMode::Explain => Ok(make_explain_result(&prepared.plan)),
+        QueryMode::Explain => Ok(make_explain_result(&prepared.physical)),
         QueryMode::Profile => {
-            let plan_cv = executor::plan_to_cypher_value(&prepared.plan);
+            let plan_cv = executor::plan_to_cypher_value(&prepared.physical);
             let mut result = stack::run_borrowed_plan(&prepared.plan, || {
-                execute_plan_with_triggers(&prepared.plan, graph)
+                execute_plan_with_triggers(&prepared.physical, graph)
             })?;
             result.plan = Some(plan_cv);
             Ok(result)
         }
         QueryMode::Normal => stack::run_borrowed_plan(&prepared.plan, || {
-            execute_plan_with_triggers(&prepared.plan, graph)
+            execute_plan_with_triggers(&prepared.physical, graph)
         }),
     };
     executor::end_execution();
@@ -513,16 +537,16 @@ pub fn execute_prepared_streaming<'a>(
     let _query = query::enter_statement(params.clone());
     match prepared.mode {
         QueryMode::Explain => {
-            let result = make_explain_result(&prepared.plan);
+            let result = make_explain_result(&prepared.physical);
             executor::end_execution();
             Ok(executor::QueryExecution::Materialized(result))
         }
         QueryMode::Profile => {
             let _pm_guard = (prepared.path_mode != ast::PathMode::Trail)
                 .then(|| session::set_path_mode(prepared.path_mode));
-            let plan_cv = executor::plan_to_cypher_value(&prepared.plan);
+            let plan_cv = executor::plan_to_cypher_value(&prepared.physical);
             let mut result = stack::run_borrowed_plan(&prepared.plan, || {
-                executor::execute_plan(&prepared.plan, graph)
+                executor::execute_physical(&prepared.physical, graph)
             })?;
             result.plan = Some(plan_cv);
             executor::end_execution();
@@ -534,12 +558,12 @@ pub fn execute_prepared_streaming<'a>(
             if prepared.path_mode != ast::PathMode::Trail {
                 let _pm_guard = session::set_path_mode(prepared.path_mode);
                 let result = stack::run_borrowed_plan(&prepared.plan, || {
-                    executor::execute_plan(&prepared.plan, graph)
+                    executor::execute_physical(&prepared.physical, graph)
                 })?;
                 executor::end_execution();
                 return Ok(executor::QueryExecution::Materialized(result));
             }
-            let exec = executor::execute_plan_streaming(&prepared.plan, graph)?;
+            let exec = executor::execute_physical_streaming(&prepared.physical, graph)?;
             if matches!(exec, executor::QueryExecution::Materialized(_)) {
                 executor::end_execution();
             }
@@ -559,16 +583,16 @@ pub fn execute_prepared_lazy(
     let _query = query::enter_statement(params.clone());
     match prepared.mode {
         QueryMode::Explain => {
-            let result = make_explain_result(&prepared.plan);
+            let result = make_explain_result(&prepared.physical);
             executor::end_execution();
             Ok(executor::QueryResultLazy::Materialized(result))
         }
         QueryMode::Profile => {
             let _pm_guard = (prepared.path_mode != ast::PathMode::Trail)
                 .then(|| session::set_path_mode(prepared.path_mode));
-            let plan_cv = executor::plan_to_cypher_value(&prepared.plan);
+            let plan_cv = executor::plan_to_cypher_value(&prepared.physical);
             let mut result = stack::run_borrowed_plan(&prepared.plan, || {
-                executor::execute_plan(&prepared.plan, graph)
+                executor::execute_physical(&prepared.physical, graph)
             })?;
             result.plan = Some(plan_cv);
             executor::end_execution();
@@ -583,11 +607,11 @@ pub fn execute_prepared_lazy(
             if prepared.path_mode != ast::PathMode::Trail {
                 let _pm_guard = session::set_path_mode(prepared.path_mode);
                 let result = stack::run_borrowed_plan(&prepared.plan, || {
-                    executor::execute_plan(&prepared.plan, graph)
+                    executor::execute_physical(&prepared.physical, graph)
                 })?;
                 return Ok(executor::QueryResultLazy::Materialized(result));
             }
-            executor::execute_plan_lazy(&prepared.plan, graph)
+            executor::execute_physical_lazy(&prepared.physical, graph)
         }
     }
 }
@@ -597,18 +621,15 @@ pub fn execute_prepared_lazy(
 /// Inner executions (subqueries, apoc.cypher.run, triggers) call `execute_plan` directly and share
 /// the capture window without re-firing.
 fn execute_plan_with_triggers(
-    plan: &planner::LogicalPlan,
+    plan: &vex::plan::PhysicalPlan,
     graph: &mut dyn GraphView,
 ) -> Result<CypherResult, CypherError> {
-    // pointer-keyed caches use AST addresses, which a freed previous query can alias: clear per
-    // execution (the content-keyed caches refill them)
-    executor::reset_pointer_caches();
     let armed = apoc_trigger::any_active() && !apoc_trigger::firing();
     if !armed {
-        return executor::execute_plan(plan, graph);
+        return executor::execute_physical(plan, graph);
     }
     traverse_core::graph::events::set_capture(true);
-    let result = executor::execute_plan(plan, graph);
+    let result = executor::execute_physical(plan, graph);
     traverse_core::graph::events::set_capture(false);
     let events = traverse_core::graph::events::drain();
     match result {
@@ -621,9 +642,9 @@ fn execute_plan_with_triggers(
 }
 
 /// EXPLAIN result without executing.
-fn make_explain_result(plan: &planner::LogicalPlan) -> CypherResult {
+fn make_explain_result(plan: &vex::plan::PhysicalPlan) -> CypherResult {
     let plan_cv = executor::plan_to_cypher_value(plan);
-    let query_type = executor::classify_plan(plan);
+    let query_type = executor::classify(plan, &executor::QueryStats::default());
     CypherResult {
         columns: vec![],
         rows: vec![],
@@ -634,8 +655,8 @@ fn make_explain_result(plan: &planner::LogicalPlan) -> CypherResult {
     }
 }
 
-/// `build_index_hints` visible to `executor::optimize_subquery_plan`, so EXISTS/COUNT subqueries
-/// get the full optimizer.
+/// `build_index_hints` for the physical planner, so EXISTS/COUNT subqueries get the full
+/// optimizer.
 pub(crate) fn build_index_hints_for(graph: &dyn GraphView) -> IndexHints {
     build_index_hints(graph)
 }
@@ -778,12 +799,19 @@ pub fn strip_literals(query: &str) -> Result<(String, Vec<CypherValue>), CypherE
     }
 
     for (i, token) in tokens.iter().enumerate() {
-        // range bounds next to `..` stay: `[*1..2]` -> Integer(1), DotDot, Integer(2)
+        // range bounds next to `..` stay: `[*1..2]` -> Integer(1), DotDot, Integer(2); so does a
+        // fixed length, `[:R*2]` / `[*2 {k: v}]` (a list index `[i*2]` keeps its literal too, only
+        // a cache key the poorer)
+        let next = tokens.get(i + 1).map(|t| &t.kind);
         let is_range_bound = matches!(token.kind, lexer::TokenKind::Integer(_))
-            && (matches!(
-                tokens.get(i + 1).map(|t| &t.kind),
-                Some(lexer::TokenKind::DotDot)
-            ) || (i > 0 && matches!(tokens[i - 1].kind, lexer::TokenKind::DotDot)));
+            && (matches!(next, Some(lexer::TokenKind::DotDot))
+                || (i > 0 && matches!(tokens[i - 1].kind, lexer::TokenKind::DotDot))
+                || (i > 0
+                    && matches!(tokens[i - 1].kind, lexer::TokenKind::Star)
+                    && matches!(
+                        next,
+                        Some(lexer::TokenKind::RBracket | lexer::TokenKind::LBrace)
+                    )));
 
         // ISO section 14.6 selector counts are grammar (`SHORTEST 3 (...)`, `ANY 2 (...)`): a placeholder
         // would be a syntax error

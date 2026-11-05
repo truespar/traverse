@@ -108,6 +108,25 @@ impl<'a> SlottedPage<'a> {
         deo.saturating_sub(fso)
     }
 
+    /// [`insert_record`](Self::insert_record) for a page nothing was deleted from: no slot
+    /// is reused, so none is scanned.
+    pub fn append_record(&mut self, data: &[u8]) -> Result<u16> {
+        let needed = data.len() + SLOT_ENTRY_SIZE;
+        if needed > self.free_space() {
+            return Err(Error::PageFull(self.page_id));
+        }
+        let new_data_end = self.data_end_offset() as usize - data.len();
+        self.buf[new_data_end..new_data_end + data.len()].copy_from_slice(data);
+        self.set_data_end_offset(new_data_end as u16);
+        let slot = self.slot_count();
+        self.set_slot_count(slot + 1);
+        self.set_free_space_offset(
+            (PAGE_HEADER_SIZE + (slot as usize + 1) * SLOT_ENTRY_SIZE) as u16,
+        );
+        self.set_slot(slot, new_data_end as u16, data.len() as u16);
+        Ok(slot)
+    }
+
     /// Inserts a record; returns its slot. Reuses a deleted record's slot when there is one, and
     /// packs the live records together first when only the bytes of deleted ones make room.
     /// `Error::PageFull` if it doesn't fit.

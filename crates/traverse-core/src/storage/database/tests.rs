@@ -1592,7 +1592,7 @@ fn thousands_of_names_save_and_load() {
 }
 
 #[test]
-fn files_without_large_records_stay_version_6() {
+fn files_without_large_records_or_compact_relationships_stay_version_6() {
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path().join("small.tvdb");
     let mut g = Graph::new();
@@ -1601,7 +1601,8 @@ fn files_without_large_records_stay_version_6() {
         props(&[("s", PropertyValue::String("x".repeat(9000)))]),
     );
     let b = g.create_node(&["N"], empty_props());
-    g.create_edge(a, b, "R", empty_props()).unwrap();
+    g.create_edge(a, b, "R", props(&[("w", PropertyValue::Int(1))]))
+        .unwrap();
     Database::save(&path, &g, b"users").unwrap();
     assert_eq!(file_version(&path), 6, "earlier releases read it");
     let mut db = Database::open(&path).unwrap();
@@ -1609,6 +1610,36 @@ fn files_without_large_records_stay_version_6() {
     db.flush().unwrap();
     drop(db);
     assert_eq!(file_version(&path), 6);
+}
+
+#[test]
+fn files_with_property_less_relationships_are_version_8() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("compact.tvdb");
+    let mut g = Graph::new();
+    let a = g.create_node(&["N"], empty_props());
+    let b = g.create_node(&["N"], empty_props());
+    g.create_edge(a, b, "R", empty_props()).unwrap();
+    Database::save(&path, &g, b"users").unwrap();
+    assert_eq!(file_version(&path), 8);
+    // a v6 file gains one such relationship through a flush and becomes v8 too
+    let path6 = dir.path().join("grown.tvdb");
+    let mut g6 = Graph::new();
+    let a6 = g6.create_node(&["N"], empty_props());
+    let b6 = g6.create_node(&["N"], empty_props());
+    g6.create_edge(a6, b6, "R", props(&[("w", PropertyValue::Int(1))]))
+        .unwrap();
+    Database::save(&path6, &g6, b"users").unwrap();
+    assert_eq!(file_version(&path6), 6);
+    let mut db = Database::open(&path6).unwrap();
+    db.graph_mut()
+        .create_edge(a6, b6, "R", empty_props())
+        .unwrap();
+    db.flush().unwrap();
+    drop(db);
+    assert_eq!(file_version(&path6), 8);
+    let db = Database::open(&path6).unwrap();
+    assert_eq!(db.graph().edge_count(), 2);
 }
 
 #[test]
@@ -1969,4 +2000,41 @@ fn a_file_mostly_reusable_space_is_due_a_compaction() {
     assert!(!db.compaction_due(0));
     drop(db);
     assert_eq!(Database::open(&path).unwrap().graph().node_count(), 500);
+}
+
+/// A bulk load leaves no version state behind: its commit is durable (the save) only after it
+/// publishes, so it collects again then, as a synced commit does. Otherwise every reader after a
+/// load takes the versioned paths until some later write's commit collects.
+#[test]
+fn a_bulk_load_leaves_no_version_state() {
+    let dir = tempfile::tempdir().unwrap();
+    for (name, saved_first) in [("fresh.tvdb", false), ("existing.tvdb", true)] {
+        let path = dir.path().join(name);
+        let db = Arc::new(Database::open(&path).unwrap());
+        if saved_first {
+            let mut w = db.begin_write();
+            GraphView::create_node(&mut w, &["Seed"], empty_props()).unwrap();
+            w.commit().unwrap();
+            db.flush().unwrap();
+        }
+        let mut tx = db.begin_bulk_load(None).unwrap();
+        let ids: Vec<NodeId> = (0..100)
+            .map(|i| {
+                GraphView::create_node(&mut tx, &["N"], props(&[("v", PropertyValue::Int(i))]))
+                    .unwrap()
+            })
+            .collect();
+        for pair in ids.windows(2) {
+            GraphView::create_edge(&mut tx, pair[0], pair[1], "R", empty_props()).unwrap();
+        }
+        tx.bulk_nodes(&["M"], vec![empty_props(); 50]).unwrap();
+        tx.commit().unwrap();
+        assert!(
+            !db.graph().has_active_deltas(),
+            "{name}: version state left after the bulk load"
+        );
+        let r = db.begin_read().unwrap();
+        assert_eq!(r.node_count(), 150 + usize::from(saved_first));
+        assert_eq!(r.edge_count(), 99);
+    }
 }

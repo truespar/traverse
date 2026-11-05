@@ -22,6 +22,76 @@ use super::{
     nanos_to_hms, weekday_from_num,
 };
 
+/// Calendar and clock fields: integers.
+const INT_FIELDS: &[&str] = &[
+    "year",
+    "month",
+    "day",
+    "week",
+    "dayOfWeek",
+    "quarter",
+    "dayOfQuarter",
+    "ordinalDay",
+    "hour",
+    "minute",
+    "second",
+    "millisecond",
+    "microsecond",
+    "nanosecond",
+    "epochSeconds",
+    "epochMillis",
+];
+/// Duration fields: any number.
+const NUM_FIELDS: &[&str] = &[
+    "years",
+    "months",
+    "weeks",
+    "days",
+    "hours",
+    "minutes",
+    "seconds",
+    "milliseconds",
+    "microseconds",
+    "nanoseconds",
+];
+/// Fields that carry a temporal value (or its string form) to build on.
+const BASE_FIELDS: &[&str] = &["date", "time", "localtime", "datetime", "localdatetime"];
+
+/// Rejects a component whose value isn't what its key takes; a null component passes
+/// through to the constructor.
+fn check_components(m: &BTreeMap<String, CypherValue>) -> Result<(), CypherError> {
+    for (k, v) in m {
+        let key = k.as_str();
+        let ok = match v {
+            CypherValue::Null => true,
+            CypherValue::Integer(_) | CypherValue::Float(_) => {
+                !(BASE_FIELDS.contains(&key) || key == "timezone")
+            }
+            CypherValue::String(_) => !(INT_FIELDS.contains(&key) || NUM_FIELDS.contains(&key)),
+            CypherValue::Date(_)
+            | CypherValue::Time(_)
+            | CypherValue::LocalTime(_)
+            | CypherValue::DateTime(_)
+            | CypherValue::LocalDateTime(_) => {
+                !(INT_FIELDS.contains(&key) || NUM_FIELDS.contains(&key) || key == "timezone")
+            }
+            _ => {
+                !(INT_FIELDS.contains(&key)
+                    || NUM_FIELDS.contains(&key)
+                    || BASE_FIELDS.contains(&key)
+                    || key == "timezone")
+            }
+        };
+        if !ok {
+            return Err(err(&format!(
+                "cannot construct a temporal value: `{key}` cannot be {}",
+                v.type_name()
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn get_int(m: &BTreeMap<String, CypherValue>, key: &str) -> Option<i64> {
     match m.get(key) {
         Some(CypherValue::Integer(i)) => Some(*i),
@@ -39,6 +109,7 @@ fn get_f64(m: &BTreeMap<String, CypherValue>, key: &str) -> Option<f64> {
 }
 
 pub(super) fn date_from_map(m: &BTreeMap<String, CypherValue>) -> Result<CypherValue, CypherError> {
+    check_components(m)?;
     // Check for string arg
     if let Some(CypherValue::String(s)) = m.get("date") {
         return parse_date_string(s);
@@ -188,6 +259,7 @@ fn time_fields_from_map(m: &BTreeMap<String, CypherValue>, base_nanos: Option<u6
 pub(super) fn localtime_from_map(
     m: &BTreeMap<String, CypherValue>,
 ) -> Result<CypherValue, CypherError> {
+    check_components(m)?;
     if let Some(CypherValue::String(s)) = m.get("time").or_else(|| m.get("localtime")) {
         return parse_localtime_string(s);
     }
@@ -197,6 +269,7 @@ pub(super) fn localtime_from_map(
 }
 
 pub(super) fn time_from_map(m: &BTreeMap<String, CypherValue>) -> Result<CypherValue, CypherError> {
+    check_components(m)?;
     if let Some(CypherValue::String(s)) = m.get("time") {
         return parse_time_string(s);
     }
@@ -242,6 +315,7 @@ pub(super) fn parse_offset_or_tz(s: &str) -> Result<i32, CypherError> {
 pub(super) fn localdatetime_from_map(
     m: &BTreeMap<String, CypherValue>,
 ) -> Result<CypherValue, CypherError> {
+    check_components(m)?;
     if let Some(CypherValue::String(s)) = m.get("localdatetime") {
         return parse_localdatetime_string(s);
     }
@@ -335,6 +409,7 @@ pub(super) fn localdatetime_from_map(
 pub(super) fn datetime_from_map(
     m: &BTreeMap<String, CypherValue>,
 ) -> Result<CypherValue, CypherError> {
+    check_components(m)?;
     if let Some(CypherValue::String(s)) = m.get("datetime") {
         return parse_datetime_string(s);
     }
@@ -551,6 +626,7 @@ fn resolve_map_timezone(
 pub(super) fn duration_from_map(
     m: &BTreeMap<String, CypherValue>,
 ) -> Result<CypherValue, CypherError> {
+    check_components(m)?;
     let mut months: f64 = 0.0;
     let mut days: f64 = 0.0;
     let mut nanos: f64 = 0.0;

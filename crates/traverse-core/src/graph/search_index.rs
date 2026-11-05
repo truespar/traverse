@@ -35,7 +35,7 @@ impl Graph {
         let node_ids: Vec<NodeId> = self
             .label_index
             .get(&lid)
-            .map(|set| set.iter().copied().collect())
+            .map(|set| set.to_vec())
             .unwrap_or_default();
         let vecs: Vec<(NodeId, Vec<f32>)> = node_ids
             .into_iter()
@@ -110,7 +110,7 @@ impl Graph {
             let nids: Vec<NodeId> = self
                 .label_index
                 .get(lid)
-                .map(|s| s.iter().copied().collect())
+                .map(|s| s.to_vec())
                 .unwrap_or_default();
             for nid in nids {
                 let texts = self.node_texts(nid, &prop_keys);
@@ -360,7 +360,7 @@ impl Graph {
         let node_ids: Vec<NodeId> = self
             .label_index
             .get(&label_id)
-            .map(|s| s.iter().copied().collect())
+            .map(|s| s.to_vec())
             .unwrap_or_default();
         let mut points: Vec<(NodeId, [f64; 3], i64)> = Vec::new();
         for nid in node_ids {
@@ -510,7 +510,7 @@ impl Graph {
         let node_ids: Vec<NodeId> = self
             .label_index
             .get(&label_id)
-            .map(|s| s.iter().copied().collect())
+            .map(|s| s.to_vec())
             .unwrap_or_default();
         let mut values: Vec<(NodeId, String)> = Vec::new();
         for nid in node_ids {

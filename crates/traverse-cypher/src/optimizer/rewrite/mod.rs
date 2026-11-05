@@ -11,6 +11,7 @@ mod fuse;
 mod index;
 mod join;
 mod seek;
+mod sort;
 #[cfg(test)]
 mod tests;
 mod walk;
@@ -30,4 +31,5 @@ pub use seek::{
     convert_anchorless_expand_to_edge_type_scan, convert_filter_to_node_by_id,
     convert_filter_to_node_by_id_range, push_label_filters_into_scan,
 };
+pub use sort::project_after_top_k;
 pub use walk::{plan_output_variables, recurse_transform};

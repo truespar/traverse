@@ -46,6 +46,8 @@ pub fn optimize(plan: LogicalPlan, graph: &dyn GraphView, hints: &IndexHints) ->
     let plan = rewrite::split_conjunctions(plan);
     let plan = rewrite::push_filters_down(plan);
     let plan = rewrite::fuse_filters(plan);
+    // a top-k needs only its keys: the projection moves above the limit
+    let plan = rewrite::project_after_top_k(plan);
     // narrow unlabeled scans from label predicates (`WHERE n:A&!B`, `(n:(A|B)&!C)`); after
     // fuse_filters (one canonical Filter), before ScanFilterProject fusion
     let plan = rewrite::push_label_filters_into_scan(plan);
@@ -290,7 +292,6 @@ pub(crate) fn is_mutating_plan(plan: &LogicalPlan) -> bool {
         | LogicalPlan::NodeByIdRange { .. }
         | LogicalPlan::EdgeTypeScan { .. }
         | LogicalPlan::ScanFilterProject { .. }
-        | LogicalPlan::SeededRows(_)
         | LogicalPlan::ContextSeed
         | LogicalPlan::EmptyRow => false,
     }
@@ -359,7 +360,6 @@ fn has_cross_product(plan: &LogicalPlan) -> bool {
         | LogicalPlan::NodeByIdRange { .. }
         | LogicalPlan::EdgeTypeScan { .. }
         | LogicalPlan::ScanFilterProject { .. }
-        | LogicalPlan::SeededRows(_)
         | LogicalPlan::EmptyRow
         | LogicalPlan::CreateIndex { .. }
         | LogicalPlan::CreateVectorIndex { .. }

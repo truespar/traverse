@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString};
+use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString, PyTuple};
 
 use traverse_core::embedded::{Lease, SharedDatabase, Transaction};
 use traverse_core::error::Error as CoreError;
@@ -375,7 +375,10 @@ impl TvDatabase {
         let lease = py
             .detach(|| self.db.begin_bulk_load())
             .map_err(map_core_err)?;
-        Ok(TvBulkWriter { lease })
+        Ok(TvBulkWriter {
+            lease,
+            keys: HashMap::new(),
+        })
     }
 
     /// Seconds :meth:`begin`, :meth:`bulk_writer` and :meth:`flush` wait for
@@ -677,6 +680,8 @@ impl TvTransaction {
 #[pyclass(name = "QueryResult")]
 struct TvQueryResult {
     columns: Vec<String>,
+    /// The column names as Python strings, made once: every dict row shares them.
+    keys: Vec<Py<PyString>>,
     rows: Vec<Vec<Py<PyAny>>>,
     stats: Py<PyAny>,
     cursor: usize,
@@ -690,12 +695,27 @@ impl TvQueryResult {
             .map(|row| row.iter().map(|val| cypher_value_to_py(py, val)).collect())
             .collect::<PyResult<Vec<Vec<_>>>>()?;
         let stats = stats_to_py(py, &result.stats)?;
+        let keys = result
+            .columns
+            .iter()
+            .map(|c| PyString::new(py, c).unbind())
+            .collect();
         Ok(TvQueryResult {
             columns: result.columns,
+            keys,
             rows,
             stats,
             cursor: 0,
         })
+    }
+
+    /// One row as a dict of column name to value.
+    fn row_dict<'py>(&self, py: Python<'py>, row: &[Py<PyAny>]) -> PyResult<Bound<'py, PyDict>> {
+        let dict = PyDict::new(py);
+        for (key, val) in self.keys.iter().zip(row) {
+            dict.set_item(key, val)?;
+        }
+        Ok(dict)
     }
 }
 
@@ -723,13 +743,20 @@ impl TvQueryResult {
     fn data(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let list = PyList::empty(py);
         for row in &self.rows {
-            let dict = PyDict::new(py);
-            for (col, val) in self.columns.iter().zip(row.iter()) {
-                dict.set_item(col, val)?;
-            }
-            list.append(dict)?;
+            list.append(self.row_dict(py, row)?)?;
         }
         Ok(list.into_any().unbind())
+    }
+
+    /// Get all rows as a list of tuples, values in column order (see :attr:`columns`). The
+    /// cheapest way to read a whole result.
+    fn values(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let rows = self
+            .rows
+            .iter()
+            .map(|row| PyTuple::new(py, row.iter().map(|v| v.clone_ref(py))))
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(PyList::new(py, rows)?.into_any().unbind())
     }
 
     fn __iter__(mut slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
@@ -741,12 +768,8 @@ impl TvQueryResult {
         if self.cursor >= self.rows.len() {
             return Ok(None);
         }
-        let row = &self.rows[self.cursor];
+        let dict = self.row_dict(py, &self.rows[self.cursor])?;
         self.cursor += 1;
-        let dict = PyDict::new(py);
-        for (col, val) in self.columns.iter().zip(row.iter()) {
-            dict.set_item(col, val)?;
-        }
         Ok(Some(dict.into_any().unbind()))
     }
 
@@ -793,6 +816,186 @@ fn py_props(properties: Option<&Bound<'_, PyDict>>) -> PyResult<BTreeMap<String,
 #[pyclass(name = "BulkWriter")]
 struct TvBulkWriter {
     lease: Lease<BulkLoadTx>,
+    /// Key column value -> node, from the CSV node loads.
+    keys: HashMap<i64, NodeId>,
+}
+
+/// A CSV column's property type.
+#[derive(Clone, Copy)]
+enum CsvKind {
+    Int,
+    Float,
+    Str,
+    Bool,
+}
+
+impl CsvKind {
+    fn parse(s: &str) -> PyResult<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "int" | "integer" => Ok(Self::Int),
+            "float" | "double" => Ok(Self::Float),
+            "string" | "str" => Ok(Self::Str),
+            "bool" | "boolean" => Ok(Self::Bool),
+            other => Err(PyValueError::new_err(format!(
+                "unknown column type `{other}` (int, float, string or bool)"
+            ))),
+        }
+    }
+}
+
+fn csv_err(e: csv::Error) -> PyErr {
+    PyValueError::new_err(e.to_string())
+}
+
+/// The header line (without its line break) and the rest of the file.
+fn split_header(bytes: &[u8]) -> (&[u8], &[u8]) {
+    let end = bytes
+        .iter()
+        .position(|&b| b == b'\n')
+        .unwrap_or(bytes.len());
+    let header = bytes[..end].strip_suffix(b"\r").unwrap_or(&bytes[..end]);
+    let body = if end < bytes.len() {
+        &bytes[end + 1..]
+    } else {
+        &bytes[end..]
+    };
+    (header, body)
+}
+
+fn header_fields(header: &[u8]) -> PyResult<Vec<String>> {
+    let mut rdr = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .from_reader(header);
+    let mut rec = csv::StringRecord::new();
+    if rdr.read_record(&mut rec).map_err(csv_err)? {
+        Ok(rec.iter().map(|s| s.trim().to_string()).collect())
+    } else {
+        Err(PyValueError::new_err("empty CSV header"))
+    }
+}
+
+fn column_index(names: &[String], name: &str, path: &str) -> PyResult<usize> {
+    names
+        .iter()
+        .position(|h| h == name)
+        .ok_or_else(|| PyValueError::new_err(format!("no column `{name}` in {path}")))
+}
+
+/// Byte ranges of about `parts` pieces of `body`, each ending at a line break.
+fn line_chunks(body: &[u8], parts: usize) -> Vec<(usize, usize)> {
+    let step = (body.len() / parts.max(1)).max(1 << 20);
+    let mut out = Vec::new();
+    let mut start = 0;
+    while start < body.len() {
+        let mut end = (start + step).min(body.len());
+        if end < body.len() {
+            end = body[end..]
+                .iter()
+                .position(|&b| b == b'\n')
+                .map_or(body.len(), |p| end + p + 1);
+        }
+        out.push((start, end));
+        start = end;
+    }
+    out
+}
+
+fn csv_int(field: &[u8], what: &str) -> PyResult<i64> {
+    let text = std::str::from_utf8(field).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    text.trim()
+        .parse()
+        .map_err(|_| PyValueError::new_err(format!("`{text}` is not an integer ({what})")))
+}
+
+/// Parses the rows of one chunk into property maps (and the key column's values when given).
+fn parse_node_rows(
+    chunk: &[u8],
+    cols: &[(usize, String, CsvKind)],
+    key_col: Option<usize>,
+) -> PyResult<(Vec<i64>, Vec<BTreeMap<String, PropertyValue>>)> {
+    let mut rdr = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .flexible(true)
+        .from_reader(chunk);
+    let mut rec = csv::ByteRecord::new();
+    let mut keys = Vec::new();
+    let mut rows = Vec::new();
+    while rdr.read_byte_record(&mut rec).map_err(csv_err)? {
+        if rec.is_empty() || (rec.len() == 1 && rec[0].is_empty()) {
+            continue;
+        }
+        let mut props = BTreeMap::new();
+        for (i, name, kind) in cols {
+            let Some(field) = rec.get(*i) else {
+                continue;
+            };
+            if field.is_empty() {
+                continue;
+            }
+            let v = match kind {
+                CsvKind::Int => PropertyValue::Int(csv_int(field, name)?),
+                CsvKind::Float => {
+                    let text = std::str::from_utf8(field)
+                        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+                    PropertyValue::Float(text.trim().parse().map_err(|_| {
+                        PyValueError::new_err(format!("`{text}` is not a number ({name})"))
+                    })?)
+                }
+                CsvKind::Bool => {
+                    let text = std::str::from_utf8(field)
+                        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+                    PropertyValue::Bool(match text.trim().to_ascii_lowercase().as_str() {
+                        "true" | "t" | "1" | "yes" => true,
+                        "false" | "f" | "0" | "no" => false,
+                        _ => {
+                            return Err(PyValueError::new_err(format!(
+                                "`{text}` is not a boolean ({name})"
+                            )));
+                        }
+                    })
+                }
+                CsvKind::Str => PropertyValue::String(
+                    std::str::from_utf8(field)
+                        .map_err(|e| PyValueError::new_err(e.to_string()))?
+                        .to_string(),
+                ),
+            };
+            props.insert(name.clone(), v);
+        }
+        if let Some(k) = key_col {
+            keys.push(csv_int(rec.get(k).unwrap_or(b""), "key")?);
+        }
+        rows.push(props);
+    }
+    Ok((keys, rows))
+}
+
+/// Parses the rows of one chunk into node pairs by key; rows naming an unknown key are counted.
+fn parse_edge_rows(
+    chunk: &[u8],
+    source: usize,
+    target: usize,
+    keys: &HashMap<i64, NodeId>,
+) -> PyResult<(Vec<(NodeId, NodeId)>, usize)> {
+    let mut rdr = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .flexible(true)
+        .from_reader(chunk);
+    let mut rec = csv::ByteRecord::new();
+    let mut pairs = Vec::new();
+    let mut skipped = 0usize;
+    while rdr.read_byte_record(&mut rec).map_err(csv_err)? {
+        if rec.is_empty() || (rec.len() == 1 && rec[0].is_empty()) {
+            continue;
+        }
+        let s = csv_int(rec.get(source).unwrap_or(b""), "source")?;
+        let t = csv_int(rec.get(target).unwrap_or(b""), "target")?;
+        match (keys.get(&s), keys.get(&t)) {
+            (Some(&a), Some(&b)) => pairs.push((a, b)),
+            _ => skipped += 1,
+        }
+    }
+    Ok((pairs, skipped))
 }
 
 impl TvBulkWriter {
@@ -856,6 +1059,114 @@ impl TvBulkWriter {
     ///     property: Property key to index.
     fn create_index(&self, name: &str, label: &str, property: &str) -> PyResult<()> {
         self.with_load(|tx| tx.create_index(name, label, property))
+    }
+
+    /// Load one node per data row of a CSV file (header row first).
+    ///
+    /// Every node gets ``labels``; the columns named in ``columns`` become
+    /// properties of the given type (``"int"``, ``"float"``, ``"string"`` or
+    /// ``"bool"``; an empty field sets nothing). ``key`` names an integer
+    /// column remembered per node, so :meth:`load_edges_csv` can refer to
+    /// the nodes by it. The file is parsed on every core; fields must not
+    /// contain line breaks.
+    ///
+    /// Returns the number of nodes created.
+    #[pyo3(signature = (path, labels, columns, key=None))]
+    fn load_nodes_csv(
+        &mut self,
+        path: &str,
+        labels: Vec<String>,
+        columns: HashMap<String, String>,
+        key: Option<String>,
+    ) -> PyResult<usize> {
+        let bytes =
+            std::fs::read(path).map_err(|e| PyValueError::new_err(format!("{path}: {e}")))?;
+        let (header, body) = split_header(&bytes);
+        let names = header_fields(header)?;
+        let mut cols: Vec<(usize, String, CsvKind)> = Vec::new();
+        for (name, kind) in &columns {
+            cols.push((
+                column_index(&names, name, path)?,
+                name.clone(),
+                CsvKind::parse(kind)?,
+            ));
+        }
+        let key_col = match &key {
+            Some(k) => Some(column_index(&names, k, path)?),
+            None => None,
+        };
+        let chunks = line_chunks(body, rayon::current_num_threads().max(1) * 2);
+        let parsed: Vec<PyResult<(Vec<i64>, Vec<BTreeMap<String, PropertyValue>>)>> = {
+            use rayon::prelude::*;
+            chunks
+                .par_iter()
+                .map(|&(a, b)| parse_node_rows(&body[a..b], &cols, key_col))
+                .collect()
+        };
+        let label_refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+        let mut total = 0usize;
+        let mut new_keys: Vec<(i64, NodeId)> = Vec::new();
+        for part in parsed {
+            let (keys, rows) = part?;
+            let n = rows.len();
+            if n == 0 {
+                continue;
+            }
+            let first = self.with_load(|tx| tx.bulk_nodes(&label_refs, rows))?;
+            if key_col.is_some() {
+                for (i, k) in keys.into_iter().enumerate() {
+                    new_keys.push((k, NodeId(first.0 + i as u64)));
+                }
+            }
+            total += n;
+        }
+        self.keys.extend(new_keys);
+        Ok(total)
+    }
+
+    /// Load one edge of ``edge_type`` per data row of a CSV file (header row
+    /// first), from the node whose key is in column ``source`` to the node
+    /// whose key is in column ``target`` (keys as remembered by
+    /// :meth:`load_nodes_csv`). Rows naming an unknown key are skipped. The
+    /// file is parsed on every core; fields must not contain line breaks.
+    ///
+    /// Returns ``(created, skipped)``.
+    #[pyo3(signature = (path, edge_type, source, target))]
+    fn load_edges_csv(
+        &mut self,
+        path: &str,
+        edge_type: &str,
+        source: &str,
+        target: &str,
+    ) -> PyResult<(usize, usize)> {
+        let bytes =
+            std::fs::read(path).map_err(|e| PyValueError::new_err(format!("{path}: {e}")))?;
+        let (header, body) = split_header(&bytes);
+        let names = header_fields(header)?;
+        let si = column_index(&names, source, path)?;
+        let ti = column_index(&names, target, path)?;
+        let chunks = line_chunks(body, rayon::current_num_threads().max(1) * 2);
+        let keys = &self.keys;
+        let parsed: Vec<PyResult<(Vec<(NodeId, NodeId)>, usize)>> = {
+            use rayon::prelude::*;
+            chunks
+                .par_iter()
+                .map(|&(a, b)| parse_edge_rows(&body[a..b], si, ti, keys))
+                .collect()
+        };
+        // one call: the first edges of a graph get their packed lists built outright
+        let mut all: Vec<(NodeId, NodeId)> = Vec::new();
+        let mut skipped = 0usize;
+        for part in parsed {
+            let (pairs, miss) = part?;
+            skipped += miss;
+            all.extend(pairs);
+        }
+        let created = all.len();
+        if created > 0 {
+            self.with_load(|tx| tx.bulk_edges(edge_type, &all).map(drop))?;
+        }
+        Ok((created, skipped))
     }
 
     /// Create an edge index.

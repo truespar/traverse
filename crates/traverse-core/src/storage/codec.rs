@@ -24,7 +24,7 @@ use crate::graph::{CatalogParts, Graph};
 use crate::storage::archive::{self, Aligned};
 use crate::storage::catalog::{self, Catalog};
 use crate::storage::compression;
-use crate::storage::format::PAGE_DATA_CAPACITY;
+use crate::storage::format::{PAGE_DATA_CAPACITY, PAGE_SIZE};
 use crate::storage::location::{LocationIndex, RecordLocation};
 use crate::storage::overflow;
 use crate::storage::page::{PageType, SLOT_ENTRY_SIZE, SlottedPage, SlottedPageRef};
@@ -141,6 +141,9 @@ pub fn load_graph(pm: PageManager) -> Result<(Graph, LocationIndex, PageManager,
             {
                 crate::memory::check_memory("edge decompression")?;
             }
+            if bytes.first() == Some(&compression::RECORD_FLAG_PROPLESS_EDGE) {
+                return Ok((decode_propless_edge(&bytes)?, page_id, slot));
+            }
             let decoded = compression::decode_record(&bytes)?;
             let archived = archive::access::<Edge>(&decoded, "relationship record")?;
             // property-less edges: topology straight from the archived form, no allocation
@@ -236,27 +239,31 @@ pub fn load_graph(pm: PageManager) -> Result<(Graph, LocationIndex, PageManager,
 /// Records a file is written from: the live graph (its caller keeps writers out) or a
 /// [`Checkpoint`] of a running store.
 pub(crate) trait RecordSource {
-    /// Calls `node` on every node, then `edge` on every relationship; stops at the first error.
-    fn for_each_record(
-        &self,
-        node: &mut dyn FnMut(&Node) -> Result<()>,
-        edge: &mut dyn FnMut(&Edge) -> Result<()>,
-    ) -> Result<()>;
-
     /// Calls `f` on each of the nodes `ids` the source has (an in-place save's changed records).
     fn nodes_by_id(&self, ids: &[NodeId], f: &mut dyn FnMut(&Node) -> Result<()>) -> Result<()>;
 
     /// [`nodes_by_id`](Self::nodes_by_id) for relationships.
     fn edges_by_id(&self, ids: &[EdgeId], f: &mut dyn FnMut(&Edge) -> Result<()>) -> Result<()>;
+
+    /// Every node, then every relationship, up to `batch` at a time, so the writer can encode a
+    /// batch in parallel; stops at the first error. The writer lays every batch into pages of its
+    /// own, so handing over one record at a time would take a page per record.
+    fn for_each_record_batch(
+        &self,
+        batch: usize,
+        nodes: &mut dyn FnMut(&[&Node]) -> Result<()>,
+        edges: &mut dyn FnMut(&[&Edge]) -> Result<()>,
+    ) -> Result<()>;
 }
 
 impl RecordSource for Graph {
-    fn for_each_record(
+    fn for_each_record_batch(
         &self,
-        node: &mut dyn FnMut(&Node) -> Result<()>,
-        edge: &mut dyn FnMut(&Edge) -> Result<()>,
+        batch: usize,
+        nodes: &mut dyn FnMut(&[&Node]) -> Result<()>,
+        edges: &mut dyn FnMut(&[&Edge]) -> Result<()>,
     ) -> Result<()> {
-        Graph::for_each_record(self, node, edge)
+        Graph::for_each_record_batch(self, batch, nodes, edges)
     }
 
     fn nodes_by_id(&self, ids: &[NodeId], f: &mut dyn FnMut(&Node) -> Result<()>) -> Result<()> {
@@ -308,6 +315,107 @@ pub fn write_checkpoint(
 
 /// Writes every record of `source` to an empty PageManager one at a time, then the catalog page
 /// (`catalog`) and the metadata page. `locations` gets each record's place.
+/// Records handed over at a time.
+const ENCODE_BATCH: usize = 1 << 18;
+/// Records one page-filling task takes: its last page is the only one left part-empty.
+const FILL_PART: usize = 1 << 14;
+
+/// Pages one task filled, in record order.
+struct Filled {
+    pages: Vec<Box<[u8; PAGE_SIZE]>>,
+    /// Per record: its page (index into `pages`) and slot; `None` for a record too large for a
+    /// page, listed in `big` with its index.
+    locs: Vec<Option<(u32, u16)>>,
+    big: Vec<(usize, Vec<u8>)>,
+    /// A fixed-layout relationship record went in.
+    compact: bool,
+}
+
+/// Encodes `items` and lays them into fresh pages of `page_type`, in order.
+fn fill_part<T: Sync>(
+    items: &[&T],
+    page_type: PageType,
+    encode: impl Fn(&T) -> Result<Vec<u8>>,
+) -> Result<Filled> {
+    let mut pages: Vec<Box<[u8; PAGE_SIZE]>> = Vec::new();
+    let mut locs = Vec::with_capacity(items.len());
+    let mut big = Vec::new();
+    let mut compact = false;
+    for (i, item) in items.iter().enumerate() {
+        let encoded = encode(item)?;
+        if encoded.first() == Some(&compression::RECORD_FLAG_PROPLESS_EDGE) {
+            compact = true;
+        }
+        if encoded.len() > overflow::MAX_INLINE {
+            locs.push(None);
+            big.push((i, encoded));
+            continue;
+        }
+        let needed = encoded.len() + SLOT_ENTRY_SIZE;
+        let fits = pages
+            .last_mut()
+            .is_some_and(|buf| SlottedPage::new(buf.as_mut(), 0).free_space() >= needed);
+        if !fits {
+            let mut buf = Box::new([0u8; PAGE_SIZE]);
+            SlottedPage::new(buf.as_mut(), 0).init(page_type);
+            pages.push(buf);
+        }
+        let page_idx = pages.len() - 1;
+        let slot = SlottedPage::new(pages[page_idx].as_mut(), 0).append_record(&encoded)?;
+        locs.push(Some((page_idx as u32, slot)));
+    }
+    Ok(Filled {
+        pages,
+        locs,
+        big,
+        compact,
+    })
+}
+
+/// Puts a task's pages into the file after everything before them and records the locations
+/// (`ids`: the record ids in the task's order); the records too large for a page go through the
+/// overflow path. The records placed.
+fn place_part(
+    pm: &mut PageManager,
+    locations: &mut Option<&mut LocationIndex>,
+    filled: Filled,
+    page_type: PageType,
+    ids: &[u64],
+    set: impl Fn(&mut LocationIndex, u64, RecordLocation),
+) -> Result<usize> {
+    if filled.compact {
+        pm.header_mut().note_compact_edges();
+    }
+    let base = pm.append_pages(filled.pages);
+    let mut placed = 0usize;
+    for (i, loc) in filled.locs.iter().enumerate() {
+        let Some((page, slot)) = loc else {
+            continue;
+        };
+        if let Some(l) = locations.as_deref_mut() {
+            set(
+                l,
+                ids[i],
+                RecordLocation {
+                    page_id: base + *page as u64,
+                    slot_idx: *slot,
+                },
+            );
+        }
+        placed += 1;
+    }
+    let mut hint = None;
+    for (i, encoded) in filled.big {
+        let stored = overflow::store(pm, encoded)?;
+        let loc = insert_record_to_page_append(pm, &stored, page_type, &mut hint)?;
+        if let Some(l) = locations.as_deref_mut() {
+            set(l, ids[i], loc);
+        }
+        placed += 1;
+    }
+    Ok(placed)
+}
+
 pub(crate) fn write_records(
     pm: &mut PageManager,
     source: &dyn RecordSource,
@@ -318,30 +426,46 @@ pub(crate) fn write_records(
     // the two callbacks share the page manager and the location index
     let shared = std::cell::RefCell::new((&mut *pm, locations));
     let (mut nodes, mut edges) = (0, 0);
-    let (mut node_page, mut edge_page) = (None, None);
-    source.for_each_record(
-        &mut |node| {
-            let encoded = encode_node(node)?;
+    // every task of a batch encodes its records and lays them into pages of its own on some
+    // core; the pages then go into the file in order
+    source.for_each_record_batch(
+        ENCODE_BATCH,
+        &mut |batch| {
+            let parts: Vec<Filled> = batch
+                .par_chunks(FILL_PART)
+                .map(|part| fill_part(part, PageType::NodeData, encode_node))
+                .collect::<Result<_>>()?;
             let (pm, locations) = &mut *shared.borrow_mut();
-            let encoded = overflow::store(pm, encoded)?;
-            let loc =
-                insert_record_to_page_append(pm, &encoded, PageType::NodeData, &mut node_page)?;
-            if let Some(l) = locations {
-                l.set_node(node.id, loc);
+            for (part, filled) in batch.chunks(FILL_PART).zip(parts) {
+                let ids: Vec<u64> = part.iter().map(|n| n.id.0).collect();
+                nodes += place_part(
+                    pm,
+                    locations,
+                    filled,
+                    PageType::NodeData,
+                    &ids,
+                    |l, id, loc| l.set_node(NodeId(id), loc),
+                )?;
             }
-            nodes += 1;
             Ok(())
         },
-        &mut |edge| {
-            let encoded = encode_edge(edge)?;
+        &mut |batch| {
+            let parts: Vec<Filled> = batch
+                .par_chunks(FILL_PART)
+                .map(|part| fill_part(part, PageType::EdgeData, encode_edge))
+                .collect::<Result<_>>()?;
             let (pm, locations) = &mut *shared.borrow_mut();
-            let encoded = overflow::store(pm, encoded)?;
-            let loc =
-                insert_record_to_page_append(pm, &encoded, PageType::EdgeData, &mut edge_page)?;
-            if let Some(l) = locations {
-                l.set_edge(edge.id, loc);
+            for (part, filled) in batch.chunks(FILL_PART).zip(parts) {
+                let ids: Vec<u64> = part.iter().map(|e| e.id.0).collect();
+                edges += place_part(
+                    pm,
+                    locations,
+                    filled,
+                    PageType::EdgeData,
+                    &ids,
+                    |l, id, loc| l.set_edge(EdgeId(id), loc),
+                )?;
             }
-            edges += 1;
             Ok(())
         },
     )?;
@@ -360,9 +484,43 @@ pub(crate) fn encode_node(node: &Node) -> Result<Vec<u8>> {
 
 /// [`encode_node`] for a relationship.
 pub(crate) fn encode_edge(edge: &Edge) -> Result<Vec<u8>> {
+    if edge.properties.is_empty() {
+        return Ok(encode_propless_edge(edge));
+    }
     let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(edge)
         .map_err(|e| Error::Serialization(e.to_string()))?;
     Ok(compression::encode_record(&bytes))
+}
+
+/// Bytes of a property-less relationship record: flag, id, type, start, end.
+const PROPLESS_EDGE_LEN: usize = 1 + 8 + 4 + 8 + 8;
+
+/// A property-less relationship in its fixed layout.
+fn encode_propless_edge(edge: &Edge) -> Vec<u8> {
+    let mut out = Vec::with_capacity(PROPLESS_EDGE_LEN);
+    out.push(compression::RECORD_FLAG_PROPLESS_EDGE);
+    out.extend_from_slice(&edge.id.0.to_le_bytes());
+    out.extend_from_slice(&edge.edge_type.0.to_le_bytes());
+    out.extend_from_slice(&edge.source.0.to_le_bytes());
+    out.extend_from_slice(&edge.target.0.to_le_bytes());
+    out
+}
+
+/// The topology in a fixed-layout relationship record.
+fn decode_propless_edge(bytes: &[u8]) -> Result<crate::graph::LoadedEdge> {
+    if bytes.len() != PROPLESS_EDGE_LEN {
+        return Err(Error::InvalidFormat(format!(
+            "relationship record of {} bytes, {PROPLESS_EDGE_LEN} expected",
+            bytes.len()
+        )));
+    }
+    let u64_at = |i: usize| u64::from_le_bytes(bytes[i..i + 8].try_into().unwrap());
+    Ok(crate::graph::LoadedEdge::Propless {
+        id: EdgeId(u64_at(1)),
+        edge_type: EdgeTypeId(u32::from_le_bytes(bytes[9..13].try_into().unwrap())),
+        source: NodeId(u64_at(13)),
+        target: NodeId(u64_at(21)),
+    })
 }
 
 /// The catalog page's records in slot order: names and id counters, property indexes,
@@ -485,13 +643,17 @@ pub(crate) fn insert_record_to_page_append(
     hint: &mut Option<u64>,
 ) -> Result<RecordLocation> {
     let needed = encoded.len() + SLOT_ENTRY_SIZE;
+    if encoded.first() == Some(&compression::RECORD_FLAG_PROPLESS_EDGE) {
+        pm.header_mut().note_compact_edges();
+    }
 
+    // the hint page was allocated (and marked dirty) here and never had a deletion
     if let Some(hint_page_id) = *hint
-        && let Ok(buf) = pm.get_page_mut(hint_page_id)
+        && let Ok(buf) = pm.page_buf_mut(hint_page_id)
     {
         let mut page = SlottedPage::new(buf.as_mut(), hint_page_id);
         if page.free_space() >= needed {
-            let slot_idx = page.insert_record(encoded)?;
+            let slot_idx = page.append_record(encoded)?;
             return Ok(RecordLocation {
                 page_id: hint_page_id,
                 slot_idx,
@@ -500,9 +662,9 @@ pub(crate) fn insert_record_to_page_append(
     }
 
     let new_page_id = pm.allocate(page_type);
-    let buf = pm.get_page_mut(new_page_id)?;
+    let buf = pm.page_buf_mut(new_page_id)?;
     let mut page = SlottedPage::new(buf.as_mut(), new_page_id);
-    let slot_idx = page.insert_record(encoded)?;
+    let slot_idx = page.append_record(encoded)?;
     *hint = Some(new_page_id);
     Ok(RecordLocation {
         page_id: new_page_id,

@@ -239,7 +239,7 @@ impl SharedDatabase {
         let (db, ticket, timeout) = self.enter()?;
         let tx = db
             .try_begin_write_owned(timeout)
-            .map(|tx| Transaction::new(Kind::Write(tx)));
+            .map(|tx| Transaction::new(Kind::Write(Box::new(tx))));
         drop(db);
         self.lease(tx, ticket)
     }
@@ -263,7 +263,7 @@ impl SharedDatabase {
             match db.try_begin_write_owned(wait) {
                 Ok(mut tx) => {
                     tx.allow_batch_commits();
-                    break Ok(Transaction::new(Kind::Write(tx)));
+                    break Ok(Transaction::new(Kind::Write(Box::new(tx))));
                 }
                 Err(Error::Busy(_)) if deadline.is_none_or(|d| Instant::now() < d) => check()?,
                 Err(Error::Busy(_)) => break Err(Error::Busy(timeout)),
@@ -440,8 +440,8 @@ pub struct Transaction {
 enum Kind {
     /// See [`SharedDatabase::begin_read`].
     Read(OwnedReadTx),
-    /// See [`SharedDatabase::begin_write`].
-    Write(OwnedWriteTx),
+    /// See [`SharedDatabase::begin_write`]; boxed, several times the size of a read.
+    Write(Box<OwnedWriteTx>),
 }
 
 impl Transaction {
@@ -455,7 +455,7 @@ impl Transaction {
     fn view(&mut self) -> &mut dyn GraphView {
         match &mut self.kind {
             Kind::Read(tx) => tx,
-            Kind::Write(tx) => tx,
+            Kind::Write(tx) => tx.as_mut(),
         }
     }
 

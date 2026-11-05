@@ -974,8 +974,12 @@ export function setApiClient(client: ApiClient): void {
 // methods on `ApiClient`. It stays a free export because there's only
 // ever one consumer (`stores/chat.ts`). The server answers with the model
 // it's configured with (`ai_provider`; health reports `features.ai`). The
-// WASM build has no server to hold a model's key, so no chat. Chat UI is
-// gated on `conn.aiChatAvailable`.
+// browser build has no server to hold a model's key: it has a chat only when
+// its build names a hosted endpoint. Chat UI is gated on `conn.aiChatAvailable`.
+
+/** A hosted assistant endpoint for the browser build, set at build time
+ *  (`VITE_TRAVERSE_PUBLIC_AI_URL`). A plain build has none, and the chat stays off. */
+const PUBLIC_AI_CHAT_URL = import.meta.env.VITE_TRAVERSE_PUBLIC_AI_URL as string | undefined
 
 export async function streamAiChat(
   messages: AiChatMessage[],
@@ -984,13 +988,22 @@ export async function streamAiChat(
   signal?: AbortSignal,
 ): Promise<void> {
   const apiKey = getApiKey()
+  // A server build posts to its own endpoint, which answers with the model the
+  // operator configured. The browser build has no server, so it posts to the
+  // hosted endpoint its build was given; `capabilities.aiChat` has already
+  // gated the UI off everywhere else.
+  const wasmMode = !api.capabilities.serverFiles
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     Accept: 'text/event-stream',
   }
-  if (apiKey) headers['X-API-Key'] = apiKey
+  // Never to the hosted endpoint: it is anonymous, and the header fails its CORS
+  // preflight rather than being ignored.
+  if (apiKey && !wasmMode) headers['X-API-Key'] = apiKey
+  const url = wasmMode ? PUBLIC_AI_CHAT_URL : '/api/ai/chat'
+  if (!url) throw new Error('this build has no assistant endpoint')
 
-  const res = await fetch('/api/ai/chat', {
+  const res = await fetch(url, {
     method: 'POST',
     headers,
     body: JSON.stringify({ messages, metadata }),

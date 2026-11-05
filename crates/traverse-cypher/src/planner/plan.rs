@@ -235,13 +235,9 @@ pub enum LogicalPlan {
         /// per-element seed rows.
         body: Box<LogicalPlan>,
     },
-    /// Runtime-only leaf emitting fixed pre-built frames. Never planned from source:
-    /// `ForEachOp` (and other seeded-write callers) build it to feed write operators
-    /// one seed row per iteration. Optimizer/cost passes never see it.
-    SeededRows(Vec<crate::frame::Frame>),
     /// Emits exactly one frame: the CURRENT SUBQUERY SEED from the executor's
     /// thread-local. For slot-native pattern-comprehension plans, which are cached
-    /// (so can't embed per-row frames like `SeededRows`) but need the outer row's
+    /// (so can't embed per-row values) but need the outer row's
     /// bindings for lookup-join keys and filters.
     ContextSeed,
     /// Loads rows from a CSV file.
@@ -765,7 +761,7 @@ pub enum LogicalPlan {
     },
     /// `CALL { ... } IN TRANSACTIONS`: body per input row with writes, committed in
     /// batches. Unlike `CallSubquery` the body runs through the write-capable
-    /// operator pipeline (`SeededRows` leaf), not the read-only record interpreter.
+    /// operator pipeline, seeded per iteration.
     CallInTransactions {
         /// Input plan with outer rows.
         input: Box<LogicalPlan>,

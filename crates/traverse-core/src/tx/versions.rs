@@ -54,6 +54,27 @@ impl CreatedRuns {
         );
     }
 
+    /// `[start, end)` created by `ci`, as one run.
+    pub(crate) fn push_range(&mut self, start: u64, end: u64, ci: *const CommitInfo) {
+        if start >= end {
+            return;
+        }
+        if let Some((_, run)) = self.runs.range_mut(..start).next_back()
+            && run.end == start
+            && std::ptr::eq(run.commit_info, ci)
+        {
+            run.end = end;
+            return;
+        }
+        self.runs.insert(
+            start,
+            Run {
+                end,
+                commit_info: ci,
+            },
+        );
+    }
+
     /// The transaction that created `id`, if it's recent.
     #[inline]
     pub(crate) fn creator(&self, id: u64) -> Option<*const CommitInfo> {

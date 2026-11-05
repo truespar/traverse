@@ -159,11 +159,31 @@ interface DatabaseSidecar {
 
 const EMPTY_STYLES: StylesData = { nodes: {}, edges: {} }
 
+/** The browser build has a Graph Assistant only when its build names a hosted
+ *  endpoint (`VITE_TRAVERSE_PUBLIC_AI_URL`) and the page runs on one of the
+ *  origins that endpoint accepts (`VITE_TRAVERSE_PUBLIC_AI_ORIGINS`: hostnames,
+ *  `*.example.com` for a domain's subdomains). Anywhere else the chat button
+ *  stays hidden rather than failing every click, so the same bundle served
+ *  from another domain shows none. A plain build names neither. */
+function hostedAssistantAvailable(): boolean {
+  const url = import.meta.env.VITE_TRAVERSE_PUBLIC_AI_URL as string | undefined
+  const origins = (import.meta.env.VITE_TRAVERSE_PUBLIC_AI_ORIGINS as string | undefined) ?? ''
+  if (!url) return false
+  const h = location.hostname
+  return origins
+    .split(',')
+    .map((o) => o.trim())
+    .filter(Boolean)
+    .some((o) => (o.startsWith('*.') ? h.endsWith(o.slice(1)) : h === o))
+}
+
 export class WasmApiClient implements ApiClient {
   readonly capabilities: ApiCapabilities = {
     users: false,
-    // the Graph Assistant needs a server that holds a model's key
-    aiChat: false,
+    // The Graph Assistant needs a server that holds a model's key. The
+    // browser build has none, so it is on only where its build names a
+    // hosted endpoint for the page's origin; anywhere else it stays off.
+    aiChat: hostedAssistantAvailable(),
     serverFiles: false,
     metrics: false,
     // the engine runs in a worker busy with the query; its time limit is what stops it
@@ -202,19 +222,12 @@ export class WasmApiClient implements ApiClient {
     for (const e of existing) client.known.add(e.name)
     if (existing.length === 0 && options?.seedSample !== false) {
       await client.seedSample()
-      // First-time WASM visitor: open the Graph Assistant panel so the
-      // chat feature is discoverable. We only do this when OPFS was
-      // empty (true first visit) AND the user hasn't explicitly chosen
-      // a state - the settings store later persists their toggles, so
-      // closing the panel once sticks. Origin gate matches the chat
-      // capability so customers self-hosting the WASM bundle don't get
-      // a pre-opened chat panel that they can't use.
-      if (
-        client.capabilities.aiChat &&
-        localStorage.getItem('tv_ai_chat_open') === null
-      ) {
-        localStorage.setItem('tv_ai_chat_open', 'true')
-      }
+      // The Graph Assistant panel is deliberately NOT pre-opened here. It
+      // used to be, to make the chat discoverable on a true first visit, and
+      // that left the panel and the Graph Assistant button out of step: the
+      // panel was already open, so a visitor's first click on the button
+      // closed it, and a second reopened it. That reads as a panel flickering
+      // and ignoring everything you type. The button does the opening.
     }
     // Restore the database the user was last viewing - connection store
     // mirrors this in localStorage under `tv-studio-database`. If that

@@ -5,6 +5,7 @@ use smallvec::SmallVec;
 
 use crate::error::{Error, Result};
 
+use super::columns::Entity;
 use super::index::{
     EdgeIndexCatalog, EdgeIndexDescriptor, EdgeIndexRegistry, IndexCatalog, IndexDescriptor,
     IndexRegistry,
@@ -27,20 +28,24 @@ impl Graph {
         };
         self.indexes.create_index(descriptor)?;
 
-        // Populate the index from existing nodes
+        // the keys of the label's nodes, read on every core and sorted; then the tree in one go
+        use rayon::prelude::*;
         let node_ids: Vec<NodeId> = self
             .label_index
             .get(&lid)
-            .map(|set| set.iter().copied().collect())
+            .map(|set| set.to_vec())
             .unwrap_or_default();
-        for nid in node_ids {
-            if let Some(node) = self.nodes.get(&nid)
-                && let Some(pv) = node.properties.get(pkid)
-                && let Some(key) = IndexKey::from_property_value(&pv)
-                && let Some(idx) = self.indexes.get_index_mut(lid, pkid)
-            {
-                idx.insert(key, nid);
-            }
+        let mut entries: Vec<(IndexKey, NodeId)> = node_ids
+            .par_iter()
+            .filter_map(|&nid| {
+                let node = self.nodes.get(&nid)?;
+                let pv = node.properties.get(pkid)?;
+                IndexKey::from_property_value(&pv).map(|key| (key, nid))
+            })
+            .collect();
+        entries.par_sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        if let Some(idx) = self.indexes.get_index_mut(lid, pkid) {
+            idx.extend_sorted(entries);
         }
         Ok(())
     }
@@ -85,7 +90,7 @@ impl Graph {
             let edge_ids: Vec<EdgeId> = self
                 .edge_type_index
                 .get(&etid)
-                .map(|s| s.iter().copied().collect())
+                .map(|s| s.to_vec())
                 .unwrap_or_default();
             for eid in edge_ids {
                 let Some(edge) = self.edges.get(&eid) else {
@@ -109,7 +114,7 @@ impl Graph {
             let node_ids: Vec<NodeId> = self
                 .label_index
                 .get(&lid)
-                .map(|s| s.iter().copied().collect())
+                .map(|s| s.to_vec())
                 .unwrap_or_default();
             for nid in node_ids {
                 let Some(node) = self.nodes.get(&nid) else {
@@ -267,6 +272,53 @@ impl Graph {
         )
     }
 
+    /// Nodes, whatever their labels, whose `property_key` is `value`, through the label indexes on
+    /// that property: `None` unless they cover every node (see
+    /// [`property_seek_covers`](Self::property_seek_covers)), so a label-less `{key: value}` lookup
+    /// needn't scan the graph.
+    pub fn property_seek(&self, property_key: &str, value: &IndexKey) -> Option<Vec<NodeId>> {
+        if self.unlabeled > 0 {
+            return None;
+        }
+        // a key no node has ever used: nothing has it
+        let Some(raw) = self.strings.get(property_key) else {
+            return Some(Vec::new());
+        };
+        let pkid = PropertyKeyId(raw);
+        let mut out = Vec::new();
+        let mut sources = 0;
+        for (lid, nodes) in &self.label_index {
+            if nodes.is_empty() {
+                continue;
+            }
+            if let Some(ids) = self.indexes.get_index(*lid, pkid)?.lookup(value) {
+                out.extend_from_slice(ids);
+            }
+            sources += 1;
+        }
+        // a node with two indexed labels comes from both
+        if sources > 1 {
+            out.sort_unstable();
+            out.dedup();
+        }
+        Some(out)
+    }
+
+    /// Whether the label indexes on `property_key` cover every node: none is without a label and
+    /// every label in use has an index on it.
+    pub fn property_seek_covers(&self, property_key: &str) -> bool {
+        if self.unlabeled > 0 {
+            return false;
+        }
+        let Some(raw) = self.strings.get(property_key) else {
+            return true;
+        };
+        let pkid = PropertyKeyId(raw);
+        self.label_index
+            .iter()
+            .all(|(lid, nodes)| nodes.is_empty() || self.indexes.has_index(*lid, pkid))
+    }
+
     /// Looks up node IDs within a key range via a property index.
     pub fn index_range_lookup(
         &self,
@@ -321,6 +373,13 @@ impl Graph {
             Some(n) => n,
             None => return,
         };
+        let i = node_id.0 as usize;
+        self.columns.refresh(
+            Entity::Node,
+            i,
+            &node.properties,
+            i < self.nodes.prefix_len(),
+        );
         let labels: SmallVec<[LabelId; 2]> = node.labels.clone();
         let props: Vec<(PropertyKeyId, IndexKey)> = node
             .properties
@@ -485,7 +544,7 @@ impl Graph {
             let edge_ids: Vec<EdgeId> = self
                 .edge_type_index
                 .get(&etid)
-                .map(|set| set.iter().copied().collect())
+                .map(|set| set.to_vec())
                 .unwrap_or_default();
             for eid in edge_ids {
                 if let Some(edge) = self.edges.get(&eid)
@@ -537,6 +596,17 @@ impl Graph {
 
     /// Add matching edge property index entries for an edge.
     pub(super) fn add_edge_to_indexes(&mut self, edge_id: EdgeId, type_id: EdgeTypeId) {
+        let i = edge_id.0 as usize;
+        let in_prefix = i < self.edge_prefix();
+        match self.edges.get(&edge_id) {
+            Some(e) => self
+                .columns
+                .refresh(Entity::Edge, i, &e.properties, in_prefix),
+            None => {
+                self.columns
+                    .refresh(Entity::Edge, i, &InternedPropertyMap::default(), in_prefix)
+            }
+        }
         if self.edge_indexes.iter_prop().next().is_none() {
             return; // no property indexes
         }

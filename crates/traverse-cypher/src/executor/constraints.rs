@@ -178,7 +178,7 @@ fn validate_composite_edge_unique_via_view(
 }
 
 /// Constraints for one property on a node.
-pub(super) fn check_node_property_constraint(
+pub(crate) fn check_node_property_constraint(
     graph: &dyn GraphView,
     nid: NodeId,
     prop_key: &str,

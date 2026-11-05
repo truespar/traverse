@@ -390,6 +390,16 @@ impl Database {
             None => self.begin_write_owned(),
         };
         tx.set_skip_redo();
+        // no file yet: the commit rewrites it whole, so nothing needs tracking as dirty
+        let fresh = self
+            .files
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .page_manager
+            .is_none();
+        if fresh {
+            tx.set_bulk(true);
+        }
         Ok(BulkLoadTx {
             tx,
             db: Arc::clone(self),
@@ -653,23 +663,17 @@ impl Database {
         }
 
         let mut locations = LocationIndex::new();
-        Self::write_file(&self.path, position, |pm| {
+        let (_, pm) = Self::write_file_keep(&self.path, position, |pm| {
             codec::write_records(pm, records, catalog, &self.metadata, Some(&mut locations))
         })?;
         // durable from here on: reclaim rlog segments the new file covers
         self.truncate_rlog(position);
 
-        // reopen as the persistent PageManager (LSN resets to 0). Failing that, the file is still
+        // the manager that wrote the file keeps serving it. Without one, the file is still
         // saved: the next save just rewrites it again.
-        match PageManager::open(&self.path) {
-            Ok(pm) => {
-                files.page_manager = Some(pm);
-                files.locations = locations;
-            }
-            Err(e) => tracing::warn!(
-                "reopening {} after a full save failed, the next save rewrites it: {e}",
-                self.path.display()
-            ),
+        if let Some(pm) = pm {
+            files.page_manager = Some(pm);
+            files.locations = locations;
         }
         Ok(())
     }
@@ -814,6 +818,44 @@ impl Database {
     /// Writes a whole `.tvdb` with `write` into a temp file stamped with `recovery_lsn`, then
     /// renames it over `path` durably. The caller holds `path`'s lock. A failed write leaves `path`
     /// as it was and removes the temp file.
+    /// [`write_file`](Self::write_file) that also hands back the page manager over the
+    /// finished file, pages still in memory, so nothing has to be read back and verified;
+    /// `None` when the file could not be reopened (it is saved either way).
+    fn write_file_keep(
+        path: &Path,
+        recovery_lsn: u64,
+        write: impl FnOnce(&mut PageManager) -> Result<codec::Written>,
+    ) -> Result<(codec::Written, Option<PageManager>)> {
+        let tmp_path = path.with_extension("tvdb.tmp");
+        let result = (|| {
+            let mut pm = PageManager::create(&tmp_path)?;
+            let written = write(&mut pm)?;
+            pm.header_mut().recovery_lsn = recovery_lsn;
+            pm.flush_new_file()?;
+            // the handle must close before the rename
+            pm.detach_file();
+            Ok((written, pm))
+        })();
+        let (written, mut pm) = match result {
+            Ok(x) => x,
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp_path);
+                return Err(e);
+            }
+        };
+        super::rename_durable(&tmp_path, path)?;
+        match pm.attach_file(path) {
+            Ok(()) => Ok((written, Some(pm))),
+            Err(e) => {
+                tracing::warn!(
+                    "reopening {} after a full save failed, the next save rewrites it: {e}",
+                    path.display()
+                );
+                Ok((written, None))
+            }
+        }
+    }
+
     fn write_file(
         path: &Path,
         recovery_lsn: u64,
@@ -824,7 +866,7 @@ impl Database {
             let mut pm = PageManager::create(&tmp_path)?;
             let written = write(&mut pm)?;
             pm.header_mut().recovery_lsn = recovery_lsn;
-            pm.flush()?;
+            pm.flush_new_file()?;
             Ok(written)
             // pm dropped here: closes the temp file
         })();
@@ -964,6 +1006,26 @@ pub struct BulkLoadTx {
 }
 
 impl BulkLoadTx {
+    /// Creates one node per property map, every one with `labels`; consecutive ids from the
+    /// returned one.
+    pub fn bulk_nodes(
+        &mut self,
+        labels: &[&str],
+        props: Vec<crate::graph::property::PropertyMap>,
+    ) -> Result<NodeId> {
+        self.tx.bulk_nodes(labels, props)
+    }
+
+    /// Creates a property-less edge of `edge_type` per `(source, target)` pair; consecutive ids
+    /// from the returned one. Every endpoint must exist.
+    pub fn bulk_edges(
+        &mut self,
+        edge_type: &str,
+        pairs: &[(NodeId, NodeId)],
+    ) -> Result<crate::graph::types::EdgeId> {
+        self.tx.bulk_edges(edge_type, pairs)
+    }
+
     /// Saves the database with the load in it, then publishes the load. On error nothing is
     /// published and the load is rolled back.
     pub fn commit(self) -> Result<HybridTimestamp> {

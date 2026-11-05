@@ -14,10 +14,34 @@ pub struct RecordLocation {
 }
 
 /// Entity ID -> on-disk record location.
+/// Record locations by id, dense (ids are handed out densely); a sentinel page marks an id
+/// without a record.
 #[derive(Debug, Default)]
 pub struct LocationIndex {
-    nodes: FxHashMap<NodeId, RecordLocation>,
-    edges: FxHashMap<EdgeId, RecordLocation>,
+    nodes: Vec<RecordLocation>,
+    edges: Vec<RecordLocation>,
+}
+
+const ABSENT: RecordLocation = RecordLocation {
+    page_id: u64::MAX,
+    slot_idx: 0,
+};
+
+fn set_at(v: &mut Vec<RecordLocation>, i: usize, loc: RecordLocation) {
+    if i >= v.len() {
+        v.resize(i + 1, ABSENT);
+    }
+    v[i] = loc;
+}
+
+fn get_at(v: &[RecordLocation], i: usize) -> Option<RecordLocation> {
+    v.get(i).filter(|l| l.page_id != u64::MAX).copied()
+}
+
+fn take_at(v: &mut [RecordLocation], i: usize) -> Option<RecordLocation> {
+    let loc = get_at(v, i)?;
+    v[i] = ABSENT;
+    Some(loc)
 }
 
 impl LocationIndex {
@@ -26,45 +50,52 @@ impl LocationIndex {
         Self::default()
     }
 
-    /// Index from pre-built maps.
+    /// An index from maps (the loader's).
     pub fn from_maps(
         nodes: FxHashMap<NodeId, RecordLocation>,
         edges: FxHashMap<EdgeId, RecordLocation>,
     ) -> Self {
-        Self { nodes, edges }
+        let mut idx = Self::default();
+        for (id, loc) in nodes {
+            idx.set_node(id, loc);
+        }
+        for (id, loc) in edges {
+            idx.set_edge(id, loc);
+        }
+        idx
     }
 
     /// Sets a node's location.
     pub fn set_node(&mut self, id: NodeId, loc: RecordLocation) {
-        self.nodes.insert(id, loc);
+        set_at(&mut self.nodes, id.0 as usize, loc);
     }
 
     /// Sets an edge's location.
     pub fn set_edge(&mut self, id: EdgeId, loc: RecordLocation) {
-        self.edges.insert(id, loc);
+        set_at(&mut self.edges, id.0 as usize, loc);
     }
 
     /// Node location, if known.
     pub fn get_node(&self, id: NodeId) -> Option<RecordLocation> {
-        self.nodes.get(&id).copied()
+        get_at(&self.nodes, id.0 as usize)
     }
 
     /// Edge location, if known.
     pub fn get_edge(&self, id: EdgeId) -> Option<RecordLocation> {
-        self.edges.get(&id).copied()
+        get_at(&self.edges, id.0 as usize)
     }
 
-    /// Removes and returns a node's location.
+    /// Forgets a node's location, returning it.
     pub fn remove_node(&mut self, id: NodeId) -> Option<RecordLocation> {
-        self.nodes.remove(&id)
+        take_at(&mut self.nodes, id.0 as usize)
     }
 
-    /// Removes and returns an edge's location.
+    /// Forgets an edge's location, returning it.
     pub fn remove_edge(&mut self, id: EdgeId) -> Option<RecordLocation> {
-        self.edges.remove(&id)
+        take_at(&mut self.edges, id.0 as usize)
     }
 
-    /// Clears everything.
+    /// Forgets everything.
     pub fn clear(&mut self) {
         self.nodes.clear();
         self.edges.clear();

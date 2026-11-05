@@ -238,7 +238,7 @@ pub fn collect_statistics(
             let count = edge_ids.len() as u64;
             let mut sources: FxHashSet<super::types::NodeId> = FxHashSet::default();
             let mut targets: FxHashSet<super::types::NodeId> = FxHashSet::default();
-            for &eid in edge_ids {
+            for eid in edge_ids {
                 if let Ok(edge) = graph.get_edge(eid) {
                     sources.insert(edge.source);
                     targets.insert(edge.target);

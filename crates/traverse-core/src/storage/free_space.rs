@@ -67,6 +67,9 @@ impl FreeSpaceMap {
         record: &[u8],
         page_type: PageType,
     ) -> Result<RecordLocation> {
+        if record.first() == Some(&crate::storage::compression::RECORD_FLAG_PROPLESS_EDGE) {
+            pm.header_mut().note_compact_edges();
+        }
         let found = self.pages(page_type).and_then(|p| p.fitting(record.len()));
         let page_id = match found {
             Some(page) => page,

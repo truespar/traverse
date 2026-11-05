@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "traverse-http"
-version = "0.9.0"
+version = "0.9.1"
 description = "Official Python HTTP client for Traverse - Truespar's in-memory graph database. Cypher queries, schema introspection, CSV import, database management."
 readme = "README.md"
 license = "MIT OR Apache-2.0"

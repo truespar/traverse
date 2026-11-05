@@ -228,8 +228,8 @@ fn variable_length_expansion_is_charged() {
 fn eager_barrier_is_charged() {
     let b = budget(0);
     let mut g = two_sets(20_000);
-    b.set(MIB);
-    // MATCH (n:A) CREATE (:A) needs an Eager over 20k rows: over 1 MiB
+    b.set(MIB / 8);
+    // MATCH (n:A) CREATE (:A) needs an Eager over 20k rows of node references: over 128 KiB
     let err = run(&mut g, "MATCH (n:A) CREATE (:A)").unwrap_err();
     assert!(err.contains("memory limit"), "{err}");
     // the non-conflicting write over the same rows streams and succeeds

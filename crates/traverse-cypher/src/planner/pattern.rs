@@ -2,15 +2,15 @@
 //! applied.
 
 use crate::ast::{
-    CmpOp, Expr, Literal, Pattern, PatternChain, PatternElement, PatternPart, RelDirection,
-    ShortestPathMode,
+    CmpOp, Expr, Literal, Pattern, PatternChain, PatternElement, PatternPart, QuantifierKind,
+    RelDirection, ShortestPathMode, UnaryOp,
 };
 use crate::error::CypherError;
 
 use super::IndexHints;
 use super::part::{
-    make_dynamic_has_label_filter, make_has_label_filter, plan_single_pattern_part, rand_id,
-    split_property_filter,
+    PartRel, PlannedPart, make_dynamic_has_label_filter, make_has_label_filter,
+    plan_single_pattern_part, rand_id, split_property_filter,
 };
 use super::plan::LogicalPlan;
 use super::vars::collect_expr_variables;
@@ -131,7 +131,7 @@ fn rewrite_part_root(
         shortest_path: ShortestPathMode::None,
         weight_property: None,
         total_cost_var: None,
-        path_mode: crate::ast::PathMode::Trail,
+        path_mode: part.path_mode,
         qpp_list_groups: Vec::new(),
         path_selector_limit: None,
     });
@@ -152,7 +152,7 @@ fn rewrite_part_root(
             shortest_path: ShortestPathMode::None,
             weight_property: None,
             total_cost_var: None,
-            path_mode: crate::ast::PathMode::Trail,
+            path_mode: part.path_mode,
             qpp_list_groups: Vec::new(),
             path_selector_limit: None,
         });
@@ -199,6 +199,10 @@ pub(super) fn plan_match_pattern_with_hints(
 
     // variables bound by earlier parts, so later parts join on shared vars
     let mut all_bound = bound_vars.clone();
+    // the relationships the earlier parts bound, `(variable, is_list)`: one MATCH binds a
+    // relationship at most once across all its parts, the comma-separated ones and those
+    // `rewrite_pattern_for_seed_binding` split off (shortest paths and WALK parts excepted)
+    let mut clause_rels: Vec<(String, bool)> = Vec::new();
 
     for part in &pattern.parts {
         // shortestPath / allShortestPaths
@@ -348,8 +352,14 @@ pub(super) fn plan_match_pattern_with_hints(
             continue;
         }
 
-        let (part_plan, renames, chain_directly, deferred) =
-            plan_single_pattern_part(part, &all_bound, hints)?;
+        let outer: Vec<String> = clause_rels.iter().map(|(v, _)| v.clone()).collect();
+        let PlannedPart {
+            plan: part_plan,
+            renames,
+            chain_directly,
+            deferred,
+            rels,
+        } = plan_single_pattern_part(part, &all_bound, hints, &outer)?;
 
         // variables this part introduces, for later parts
         let elem = &part.element;
@@ -365,11 +375,18 @@ pub(super) fn plan_match_pattern_with_hints(
             }
         }
 
-        result = Some(if chain_directly {
+        let combined = if chain_directly {
             // bound first node or pre-bound var-length path: chain directly on the existing plan
             // (it replaces the EmptyRow placeholder)
             let existing = result.unwrap_or(LogicalPlan::EmptyRow);
             let mut plan = replace_empty_row(part_plan, existing);
+            // a relationship an earlier clause bound, expanded under a recheck alias
+            for (recheck_var, original_var) in &renames {
+                plan = LogicalPlan::Filter {
+                    input: Box::new(plan),
+                    predicate: same_id(recheck_var, original_var),
+                };
+            }
             for pred in &deferred {
                 plan = LogicalPlan::Filter {
                     input: Box::new(plan),
@@ -380,8 +397,15 @@ pub(super) fn plan_match_pattern_with_hints(
         } else {
             match result {
                 None => {
-                    // first part: apply deferred predicates directly
+                    // first part: apply deferred predicates directly (and the rechecks: an
+                    // OPTIONAL MATCH plans from an EmptyRow its outer row seeds)
                     let mut plan = part_plan;
+                    for (recheck_var, original_var) in &renames {
+                        plan = LogicalPlan::Filter {
+                            input: Box::new(plan),
+                            predicate: same_id(recheck_var, original_var),
+                        };
+                    }
                     for pred in &deferred {
                         plan = LogicalPlan::Filter {
                             input: Box::new(plan),
@@ -400,21 +424,7 @@ pub(super) fn plan_match_pattern_with_hints(
                     for (recheck_var, original_var) in &renames {
                         combined = LogicalPlan::Filter {
                             input: Box::new(combined),
-                            predicate: Expr::Comparison(
-                                Box::new(Expr::FunctionCall {
-                                    name: "id".to_string(),
-                                    args: vec![Expr::Variable(recheck_var.clone())],
-                                    distinct: false,
-                                }),
-                                vec![(
-                                    CmpOp::Eq,
-                                    Expr::FunctionCall {
-                                        name: "id".to_string(),
-                                        args: vec![Expr::Variable(original_var.clone())],
-                                        distinct: false,
-                                    },
-                                )],
-                            ),
+                            predicate: same_id(recheck_var, original_var),
                         };
                     }
                     // deferred predicates (outer variable refs) go AFTER the CrossProduct, where
@@ -428,10 +438,83 @@ pub(super) fn plan_match_pattern_with_hints(
                     combined
                 }
             }
-        });
+        };
+        result = Some(keep_rels_apart(
+            combined,
+            &rels,
+            &clause_rels,
+            chain_directly,
+        ));
+        clause_rels.extend(rels.into_iter().map(|r| (r.var, r.list)));
     }
 
     Ok(result.unwrap_or(LogicalPlan::EmptyRow))
+}
+
+/// `id(v)`.
+fn id_of(v: &str) -> Expr {
+    Expr::FunctionCall {
+        name: "id".to_string(),
+        args: vec![Expr::Variable(v.to_string())],
+        distinct: false,
+    }
+}
+
+/// `id(a) = id(b)`.
+fn same_id(a: &str, b: &str) -> Expr {
+    Expr::Comparison(Box::new(id_of(a)), vec![(CmpOp::Eq, id_of(b))])
+}
+
+/// Filters keeping a part's relationships off the ones bound before them that no expand kept
+/// them off: the earlier parts' when the part was cross-joined, and, for a relationship taken
+/// from its endpoints' binding, every one before it.
+fn keep_rels_apart(
+    mut plan: LogicalPlan,
+    rels: &[PartRel],
+    clause_rels: &[(String, bool)],
+    chain_directly: bool,
+) -> LogicalPlan {
+    for (k, rel) in rels.iter().enumerate() {
+        let earlier = clause_rels
+            .iter()
+            .map(|(v, list)| (v.as_str(), *list))
+            .filter(|_| rel.bound || !chain_directly)
+            .chain(
+                rels[..k]
+                    .iter()
+                    .filter(|_| rel.bound)
+                    .map(|r| (r.var.as_str(), r.list)),
+            );
+        for (other, other_list) in earlier {
+            plan = LogicalPlan::Filter {
+                input: Box::new(plan),
+                predicate: rels_differ((&rel.var, rel.list), (other, other_list)),
+            };
+        }
+    }
+    plan
+}
+
+/// `a` and `b` share no relationship; each is one relationship or a list of them.
+fn rels_differ(a: (&str, bool), b: (&str, bool)) -> Expr {
+    let var = |v: &str| Box::new(Expr::Variable(v.to_string()));
+    let not_in =
+        |x: &str, list: &str| Expr::UnaryOp(UnaryOp::Not, Box::new(Expr::In(var(x), var(list))));
+    match (a, b) {
+        ((a, false), (b, false)) => {
+            Expr::Comparison(Box::new(id_of(a)), vec![(CmpOp::Neq, id_of(b))])
+        }
+        ((one, false), (list, true)) | ((list, true), (one, false)) => not_in(one, list),
+        ((a, true), (b, true)) => {
+            let x = format!("__uniq_{}", rand_id());
+            Expr::QuantifierExpr {
+                kind: QuantifierKind::None,
+                variable: x.clone(),
+                list_expr: var(a),
+                predicate: Box::new(Expr::In(var(&x), var(b))),
+            }
+        }
+    }
 }
 
 /// Replaces `EmptyRow` in a plan tree.

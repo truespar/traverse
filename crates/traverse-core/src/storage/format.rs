@@ -28,8 +28,13 @@ pub const FORMAT_VERSION_V6: u32 = 6;
 /// read.
 pub const FORMAT_VERSION_V7: u32 = 7;
 
+/// Format v8: a relationship without properties is a fixed 29-byte record (flag, id, type,
+/// start, end) instead of a serialized structure. Only a file that has some is written as v8;
+/// the rest stay v6 or v7.
+pub const FORMAT_VERSION_V8: u32 = 8;
+
 /// Newest format version this build reads and writes.
-pub const CURRENT_FORMAT_VERSION: u32 = FORMAT_VERSION_V7;
+pub const CURRENT_FORMAT_VERSION: u32 = FORMAT_VERSION_V8;
 
 /// File header size (4 KiB).
 pub const HEADER_SIZE: usize = 4096;
@@ -111,6 +116,11 @@ impl FileHeader {
     /// The file has overflow pages: written as v7 from now on.
     pub fn note_overflow(&mut self) {
         self.version = self.version.max(FORMAT_VERSION_V7);
+    }
+
+    /// The file has fixed-layout property-less relationship records: v8 from now on.
+    pub fn note_compact_edges(&mut self) {
+        self.version = self.version.max(FORMAT_VERSION_V8);
     }
 
     /// To a 4096-byte buffer (v6 layout, version 6 or 7).

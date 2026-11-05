@@ -240,8 +240,7 @@ impl Connection {
 
                     // EXPLAIN: no deferral, return the plan now
                     if prepared.mode == traverse_cypher::ast::QueryMode::Explain {
-                        let plan_cv =
-                            traverse_cypher::executor::plan_to_cypher_value(&prepared.plan);
+                        let plan_cv = prepared.plan_value();
                         self.pending_results.insert(
                             qid,
                             PendingResult {
@@ -262,9 +261,7 @@ impl Connection {
                         // store the prepared query for deferred execution on PULL; the
                         // auto-commit transaction is listed from now until its rows are out
                         let plan_cv = if prepared.mode == traverse_cypher::ast::QueryMode::Profile {
-                            Some(traverse_cypher::executor::plan_to_cypher_value(
-                                &prepared.plan,
-                            ))
+                            Some(prepared.plan_value())
                         } else {
                             None
                         };

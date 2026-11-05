@@ -43,6 +43,9 @@ pub struct BellmanFordConfig {
     pub source: NodeId,
     /// If set, only the path to this node is returned (`targetNodeId`).
     pub target: Option<NodeId>,
+    /// Nothing reads the paths' node, edge and cost lists (stats mode, or a stream yielding none of
+    /// them), so a run keeps only the distances.
+    pub count_only: bool,
 }
 
 impl GraphAlgorithm for BellmanFord {
@@ -100,6 +103,7 @@ impl GraphAlgorithm for BellmanFord {
         Ok(BellmanFordConfig {
             source: NodeId(source as u64),
             target,
+            count_only: crate::algorithms::procedure::path_lists_unread(params),
         })
     }
 
@@ -118,7 +122,7 @@ impl GraphAlgorithm for BellmanFord {
         // unit weights: distances are hop counts, no negative cycle can exist and SPFA degenerates
         // to BFS; a slice-fast-path BFS is much faster, and the relaxation counter goes away
         if graph.is_unit_weighted() {
-            return bfs_sssp(graph, cfg.source, cfg.target, cap, cancel);
+            return bfs_sssp(graph, cfg.source, cfg.target, cfg.count_only, cap, cancel);
         }
 
         let n_active = graph.active_nodes().len() as u32;
@@ -258,21 +262,23 @@ impl GraphAlgorithm for BellmanFord {
 /// path: slice fast path in the frontier scan without filters, else
 /// `for_each_out`.
 ///
-/// Without a `target`: no `pred[]` / `pred_edge[]` writes (~2 of 3 stores per
+/// Without a `target`, when nothing reads the path lists (stats mode, or a stream
+/// yielding none): no `pred[]` / `pred_edge[]` writes (~2 of 3 stores per
 /// neighbor) and `u32` distances (4x denser than `f64`, hops are integers). One
-/// placeholder PathRecord per reachable node keeps `pathCount` right for stats.
+/// PathRecord per reachable node, its lists empty.
 fn bfs_sssp(
     graph: &dyn AlgorithmGraph,
     source: NodeId,
     target: Option<NodeId>,
+    count_only: bool,
     cap: usize,
     cancel: &CancellationToken,
 ) -> Result<PathResult, AlgorithmError> {
     let s_idx = source.0 as usize;
     let slice_path = graph.outgoing_adj_slice(source).is_some();
 
-    if target.is_none() {
-        return bfs_sssp_count_only(graph, source, cap, slice_path, cancel);
+    if target.is_none() && count_only {
+        return super::delta_stepping::bfs_sssp_count_only(graph, source, cap, slice_path, cancel);
     }
 
     const SENTINEL: u32 = u32::MAX;
@@ -325,123 +331,48 @@ fn bfs_sssp(
         std::mem::swap(&mut current, &mut next);
     }
 
-    // target given: one path back through pred[]/pred_edge[]
-    let t = target.unwrap();
-    if dist[t.0 as usize].is_finite() {
+    // one path back through pred[]/pred_edge[] per target: the given one, else every reachable
+    // node but the source
+    let path_to = |t: NodeId| -> Option<PathRecord> {
+        if !dist[t.0 as usize].is_finite() {
+            return None;
+        }
         let mut nodes_rev: Vec<NodeId> = Vec::new();
         let mut edges_rev: Vec<EdgeId> = Vec::new();
         let mut costs_rev: Vec<f64> = Vec::new();
         let mut cur = t;
-        let ok = loop {
+        loop {
             nodes_rev.push(cur);
             costs_rev.push(dist[cur.0 as usize]);
             if cur == source {
-                break true;
+                break;
             }
             let p = pred[cur.0 as usize];
             if p == SENTINEL {
-                break false;
+                return None;
             }
             edges_rev.push(EdgeId(pred_edge[cur.0 as usize]));
             cur = NodeId(p as u64);
-        };
-        if ok {
-            nodes_rev.reverse();
-            edges_rev.reverse();
-            costs_rev.reverse();
-            return Ok(PathResult {
-                paths: vec![PathRecord {
-                    source,
-                    target: t,
-                    total_cost: dist[t.0 as usize],
-                    node_ids: nodes_rev,
-                    edge_ids: edges_rev,
-                    costs: costs_rev,
-                }],
-            });
         }
-    }
-    Ok(PathResult { paths: Vec::new() })
-}
-
-/// No-target BFS keeping only `dist[]` (no predecessor arrays: 2 of 3 inner-loop stores saved), as
-/// `u32` hops: 4 B per node instead of 16 B (f64 + u64), so more of the graph stays in cache.
-fn bfs_sssp_count_only(
-    graph: &dyn AlgorithmGraph,
-    source: NodeId,
-    cap: usize,
-    slice_path: bool,
-    cancel: &CancellationToken,
-) -> Result<PathResult, AlgorithmError> {
-    const UNVISITED: u32 = u32::MAX;
-    let mut dist: Vec<u32> = vec![UNVISITED; cap];
-    let s_idx = source.0 as usize;
-    dist[s_idx] = 0;
-
-    let initial_cap = (cap / 16).max(256);
-    let mut current: Vec<NodeId> = Vec::with_capacity(initial_cap);
-    let mut next: Vec<NodeId> = Vec::with_capacity(initial_cap);
-    current.push(source);
-    let mut depth: u32 = 0;
-    while !current.is_empty() {
-        cancel.check()?;
-        depth = depth.saturating_add(1);
-        if slice_path {
-            for &u in &current {
-                let slice = match graph.outgoing_adj_slice(u) {
-                    Some(s) => s,
-                    None => continue,
-                };
-                for ep in slice {
-                    let vi = ep.neighbor().0 as usize;
-                    if vi < cap && dist[vi] == UNVISITED {
-                        dist[vi] = depth;
-                        next.push(NodeId(ep.neighbor().0));
-                    }
-                }
-            }
-        } else {
-            for &u in &current {
-                graph.for_each_out(u, &mut |v, _eid, _w| {
-                    let vi = v.0 as usize;
-                    if vi < cap && dist[vi] == UNVISITED {
-                        dist[vi] = depth;
-                        next.push(v);
-                    }
-                });
-            }
-        }
-        current.clear();
-        std::mem::swap(&mut current, &mut next);
-    }
-
-    // count reachable nodes (any with a depth) and emit one PathRecord each: stats reads
-    // `paths.len()`, stream also `total_cost` and the empty list fields; `target` + `total_cost`
-    // stay populated for the public contract
-    let mut count = 0usize;
-    for i in 0..cap {
-        if dist[i] != UNVISITED && i != s_idx {
-            count += 1;
-        }
-    }
-    let mut paths: Vec<PathRecord> = Vec::with_capacity(count);
-    for i in 0..cap {
-        if i == s_idx {
-            continue;
-        }
-        let d = dist[i];
-        if d == UNVISITED {
-            continue;
-        }
-        paths.push(PathRecord {
+        nodes_rev.reverse();
+        edges_rev.reverse();
+        costs_rev.reverse();
+        Some(PathRecord {
             source,
-            target: NodeId(i as u64),
-            total_cost: d as f64,
-            node_ids: Vec::new(),
-            edge_ids: Vec::new(),
-            costs: Vec::new(),
-        });
-    }
+            target: t,
+            total_cost: dist[t.0 as usize],
+            node_ids: nodes_rev,
+            edge_ids: edges_rev,
+            costs: costs_rev,
+        })
+    };
+    let paths = match target {
+        Some(t) => path_to(t).into_iter().collect(),
+        None => (0..cap)
+            .filter(|&i| i != s_idx)
+            .filter_map(|i| path_to(NodeId(i as u64)))
+            .collect(),
+    };
     Ok(PathResult { paths })
 }
 
@@ -472,25 +403,39 @@ mod tests {
 
         let view: &(dyn GraphView + Sync) = &g;
         let proj = AlgorithmGraphView::open(view).unwrap();
-        let r = BellmanFord
-            .run(
-                &proj,
-                &BellmanFordConfig {
-                    source: a,
-                    target: None,
-                },
-                &CancellationToken::none(),
-            )
-            .unwrap();
-        assert_eq!(r.paths.len(), 3, "expected 3 reachable (b, c, d)");
-        // costs 1, 2, 3 in some order
-        let mut costs: Vec<f64> = r.paths.iter().map(|p| p.total_cost).collect();
-        costs.sort_by(|x, y| x.partial_cmp(y).unwrap());
-        assert_eq!(costs, vec![1.0, 2.0, 3.0]);
-        // the source is never a target
-        for p in &r.paths {
-            assert_ne!(p.target, a);
-            assert_eq!(p.source, a);
+        for count_only in [true, false] {
+            let r = BellmanFord
+                .run(
+                    &proj,
+                    &BellmanFordConfig {
+                        source: a,
+                        target: None,
+                        count_only,
+                    },
+                    &CancellationToken::none(),
+                )
+                .unwrap();
+            assert_eq!(r.paths.len(), 3, "expected 3 reachable (b, c, d)");
+            // costs 1, 2, 3 in some order
+            let mut costs: Vec<f64> = r.paths.iter().map(|p| p.total_cost).collect();
+            costs.sort_by(|x, y| x.partial_cmp(y).unwrap());
+            assert_eq!(costs, vec![1.0, 2.0, 3.0]);
+            // the source is never a target
+            for p in &r.paths {
+                assert_ne!(p.target, a);
+                assert_eq!(p.source, a);
+                // stream rows carry the path: the source, one node per hop
+                let hops = if count_only {
+                    0
+                } else {
+                    p.total_cost as usize + 1
+                };
+                assert_eq!(p.node_ids.len(), hops, "count_only {count_only}");
+                assert_eq!(p.costs.len(), hops);
+                if !count_only {
+                    assert_eq!((p.node_ids[0], *p.node_ids.last().unwrap()), (a, p.target));
+                }
+            }
         }
     }
 
@@ -512,6 +457,7 @@ mod tests {
                 &BellmanFordConfig {
                     source: a,
                     target: Some(c),
+                    count_only: false,
                 },
                 &CancellationToken::none(),
             )

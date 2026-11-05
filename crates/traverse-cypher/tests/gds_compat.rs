@@ -143,10 +143,19 @@ fn dijkstra_similarity_louvain() {
     let sp = ok(
         &mut g,
         "MATCH (a:P {id: 0}), (d:P {id: 3}) \
-         CALL gds.shortestPath.dijkstra.stream('g3', {sourceNode: a, targetNode: d}) \
+         CALL gds.shortestPath.dijkstra.stream('g3', \
+              {sourceNode: a, targetNode: d, relationshipWeightProperty: 'w'}) \
          YIELD totalCost RETURN totalCost",
     );
     assert_eq!(sp[0][0], CypherValue::Float(7.0));
+    // as in GDS, the projected weights count only when the call names them: 3 hops
+    let hops = ok(
+        &mut g,
+        "MATCH (a:P {id: 0}), (d:P {id: 3}) \
+         CALL gds.shortestPath.dijkstra.stream('g3', {sourceNode: a, targetNode: d}) \
+         YIELD totalCost RETURN totalCost",
+    );
+    assert_eq!(hops[0][0], CypherValue::Float(3.0));
     // nodeSimilarity with GDS column names (node1/node2/similarity)
     let sim = ok(
         &mut g,
@@ -448,7 +457,8 @@ fn materialized_id_remapping() {
     let sp = ok(
         &mut g,
         "MATCH (a:P {id: 0}), (d:P {id: 3}) \
-         CALL gds.shortestPath.dijkstra.stream('remap', {sourceNode: a, targetNode: d}) \
+         CALL gds.shortestPath.dijkstra.stream('remap', \
+              {sourceNode: a, targetNode: d, relationshipWeightProperty: 'w'}) \
          YIELD sourceNode, targetNode, totalCost RETURN totalCost, sourceNode = id(a), targetNode = id(d)",
     );
     assert_eq!(sp[0][0], CypherValue::Float(7.0));
@@ -783,4 +793,298 @@ fn write_mode_maintains_property_indexes() {
         ),
         CypherValue::Integer(6)
     );
+}
+
+/// GDS single-source shortest paths (delta and dijkstra) stream the source itself at cost 0 and a
+/// full path to every reachable node, weighted or not; stats counts the same paths.
+#[test]
+fn single_source_paths_start_at_the_source() {
+    let mut g = Graph::new();
+    fixture(&mut g);
+    ok(
+        &mut g,
+        "CALL gds.graph.project('sssp', 'P', {R: {type: 'R', properties: 'w'}})",
+    );
+    for algo in ["delta", "dijkstra"] {
+        for (weight, far) in [("", 3.0), (", relationshipWeightProperty: 'w'", 7.0)] {
+            let rows = ok(
+                &mut g,
+                &format!(
+                    "MATCH (s:P {{id: 0}}) \
+                     CALL gds.allShortestPaths.{algo}.stream('sssp', {{sourceNode: s{weight}}}) \
+                     YIELD targetNode, totalCost, nodeIds, costs \
+                     RETURN gds.util.asNode(targetNode).id AS t, totalCost, \
+                            [n IN nodeIds | gds.util.asNode(n).id] AS ids, costs ORDER BY t"
+                ),
+            );
+            let q = format!("{algo}{weight}");
+            assert_eq!(rows.len(), 6, "{q}");
+            assert_eq!(rows[0][0], CypherValue::Integer(0), "{q}: the source row");
+            assert_eq!(rows[0][1], CypherValue::Float(0.0), "{q}");
+            assert_eq!(
+                rows[0][2],
+                CypherValue::List(vec![CypherValue::Integer(0)]),
+                "{q}"
+            );
+            // d(3) is reached through a -> b -> c -> d
+            assert_eq!(rows[3][1], CypherValue::Float(far), "{q}");
+            assert_eq!(
+                rows[3][2],
+                CypherValue::List((0..4).map(CypherValue::Integer).collect()),
+                "{q}"
+            );
+            let CypherValue::List(costs) = &rows[3][3] else {
+                panic!("{q}: costs {:?}", rows[3][3]);
+            };
+            assert_eq!(costs.len(), 4, "{q}");
+            assert_eq!(costs[3], CypherValue::Float(far), "{q}");
+        }
+    }
+    // a source with nothing reachable still streams itself
+    ok(&mut g, "CREATE (:P {id: 9})");
+    ok(&mut g, "CALL gds.graph.project('sink', 'P', 'R')");
+    let alone = ok(
+        &mut g,
+        "MATCH (s:P {id: 9}) CALL gds.allShortestPaths.dijkstra.stream('sink', {sourceNode: s}) \
+         YIELD totalCost, nodeIds RETURN totalCost, size(nodeIds)",
+    );
+    assert_eq!(
+        alone,
+        [[CypherValue::Float(0.0), CypherValue::Integer(1)]],
+        "the source alone"
+    );
+    ok(&mut g, "CALL gds.graph.drop('sink')");
+    let count = one(
+        &mut g,
+        "MATCH (s:P {id: 0}) \
+         CALL traverse.deltaStepping.stats({sourceNodeId: id(s)}) YIELD pathCount \
+         RETURN pathCount",
+    );
+    assert_eq!(
+        count,
+        CypherValue::Integer(5),
+        "stats leaves the source out"
+    );
+    // a weight property the projection doesn't hold is an error, as in GDS
+    let err = run(
+        &mut g,
+        "MATCH (s:P {id: 0}) CALL gds.allShortestPaths.dijkstra.stream('sssp', \
+         {sourceNode: s, relationshipWeightProperty: 'nope'}) YIELD totalCost RETURN totalCost",
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("`nope` not found"), "{err}");
+    ok(&mut g, "CALL gds.graph.drop('sssp')");
+}
+
+/// GDS `scaler` on the centralities: names case-insensitive, NONE leaves the scores, an unknown
+/// name is an error.
+#[test]
+fn centrality_scalers() {
+    let mut g = Graph::new();
+    fixture(&mut g);
+    ok(&mut g, "CALL gds.graph.project('sc', 'P', 'R')");
+    let scores = |g: &mut Graph, algo: &str, scaler: &str| -> Vec<f64> {
+        ok(
+            g,
+            &format!(
+                "CALL gds.{algo}.stream('sc', {{scaler: '{scaler}'}}) YIELD nodeId, score \
+                 RETURN score ORDER BY gds.util.asNode(nodeId).id"
+            ),
+        )
+        .into_iter()
+        .map(|r| match r[0] {
+            CypherValue::Float(f) => f,
+            ref v => panic!("{algo} {scaler}: {v:?}"),
+        })
+        .collect()
+    };
+    for algo in ["pageRank", "articleRank"] {
+        let raw = scores(&mut g, algo, "NONE");
+        let sum: f64 = raw.iter().sum();
+        let l1 = scores(&mut g, algo, "l1Norm");
+        for (r, s) in raw.iter().zip(&l1) {
+            assert!((r / sum - s).abs() < 1e-12, "{algo}: {raw:?} -> {l1:?}");
+        }
+        let max = raw.iter().cloned().fold(f64::MIN, f64::max);
+        let min = raw.iter().cloned().fold(f64::MAX, f64::min);
+        let mm = scores(&mut g, algo, "MinMax");
+        for (r, s) in raw.iter().zip(&mm) {
+            assert!(
+                ((r - min) / (max - min) - s).abs() < 1e-12,
+                "{algo}: {mm:?}"
+            );
+        }
+    }
+    let err = run(
+        &mut g,
+        "CALL gds.pageRank.stream('sc', {scaler: 'bogus'}) YIELD score RETURN score",
+    )
+    .unwrap_err();
+    assert!(err.to_string().to_lowercase().contains("bogus"), "{err}");
+    ok(&mut g, "CALL gds.graph.drop('sc')");
+}
+
+/// An UNDIRECTED projection lists every relationship at both ends, as GDS does: the values below
+/// are Neo4j GDS 2026.03.0's on the same graph (two triangles joined by c -> d).
+#[test]
+fn undirected_projection_reads_both_directions() {
+    let mut g = Graph::new();
+    fixture(&mut g);
+    ok(
+        &mut g,
+        "CALL gds.graph.project('u', 'P', {R: {orientation: 'UNDIRECTED'}})",
+    );
+    let col = |g: &mut Graph, call: &str, yield_: &str| -> Vec<f64> {
+        ok(
+            g,
+            &format!(
+                "CALL gds.{call} YIELD nodeId, {yield_} AS v \
+                 RETURN round(toFloat(v) * 10000) / 10000 ORDER BY gds.util.asNode(nodeId).id"
+            ),
+        )
+        .into_iter()
+        .map(|r| match r[0] {
+            CypherValue::Float(f) => f,
+            ref v => panic!("{call}: {v:?}"),
+        })
+        .collect()
+    };
+    let (rim, hub) = (0.3536, 0.5);
+    assert_eq!(
+        col(&mut g, "eigenvector.stream('u')", "score"),
+        [rim, rim, hub, hub, rim, rim]
+    );
+    assert_eq!(
+        col(&mut g, "degree.stream('u')", "score"),
+        [2.0, 2.0, 3.0, 3.0, 2.0, 2.0]
+    );
+    assert_eq!(
+        col(&mut g, "betweenness.stream('u')", "score"),
+        [0.0, 0.0, 6.0, 6.0, 0.0, 0.0]
+    );
+    assert_eq!(
+        col(&mut g, "pageRank.stream('u')", "score"),
+        [0.8427, 0.8427, 1.1983, 1.1983, 0.8427, 0.8427]
+    );
+    assert_eq!(
+        col(&mut g, "articleRank.stream('u')", "score"),
+        [0.2446, 0.2446, 0.2926, 0.2926, 0.2446, 0.2446]
+    );
+    assert_eq!(
+        col(&mut g, "kcore.stream('u')", "coreValue"),
+        [2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
+    );
+    // GDS counts an undirected relationship once per direction
+    assert_eq!(
+        one(
+            &mut g,
+            "CALL gds.graph.list('u') YIELD relationshipCount RETURN relationshipCount"
+        ),
+        CypherValue::Integer(14)
+    );
+    // reached against the stored direction: f(5) only points at d(3)
+    let sp = ok(
+        &mut g,
+        "MATCH (a:P {id: 0}), (f:P {id: 5}) \
+         CALL gds.shortestPath.dijkstra.stream('u', {sourceNode: a, targetNode: f}) \
+         YIELD totalCost, nodeIds RETURN totalCost, [n IN nodeIds | gds.util.asNode(n).id]",
+    );
+    assert_eq!(sp[0][0], CypherValue::Float(3.0));
+    // write mode runs on the live graph, undirected there too
+    ok(&mut g, "CALL gds.degree.write('u', {writeProperty: 'deg'})");
+    assert_eq!(
+        one(&mut g, "MATCH (n:P {id: 2}) RETURN n.deg"),
+        CypherValue::Float(3.0)
+    );
+    ok(&mut g, "CALL gds.graph.drop('u')");
+
+    // a self-loop lists twice at its node: GDS's degree counts it 2
+    let mut g = Graph::new();
+    ok(
+        &mut g,
+        "CREATE (a:Z {id: 0}), (b:Z {id: 1}), (c:Z {id: 2}) \
+         CREATE (a)-[:L]->(a), (a)-[:L]->(b), (b)-[:L]->(a), (b)-[:L]->(c)",
+    );
+    ok(
+        &mut g,
+        "CALL gds.graph.project('z', 'Z', {L: {orientation: 'UNDIRECTED'}})",
+    );
+    assert_eq!(col(&mut g, "degree.stream('z')", "score"), [4.0, 3.0, 1.0]);
+    assert_eq!(
+        col(&mut g, "kcore.stream('z')", "coreValue"),
+        [2.0, 2.0, 1.0]
+    );
+}
+
+/// Path traversals stream GDS's shapes: bfs / dfs one row (visit order, a NEXT path), Bellman-Ford
+/// the source row, a route and isNegativeCycle false; articleRank and pageRank.mutate GDS's own
+/// scale.
+#[test]
+fn traversal_rows_and_rank_scales_as_in_gds() {
+    let mut g = Graph::new();
+    fixture(&mut g);
+    ok(
+        &mut g,
+        "CALL gds.graph.project('t', 'P', {R: {type: 'R', properties: 'w'}})",
+    );
+    let bfs = ok(
+        &mut g,
+        "MATCH (s:P {id: 3}) CALL gds.bfs.stream('t', {sourceNode: s}) YIELD nodeIds, path \
+         RETURN [n IN nodeIds | gds.util.asNode(n).id], [r IN relationships(path) | type(r)]",
+    );
+    assert_eq!(bfs.len(), 1, "one row per traversal");
+    assert_eq!(
+        bfs[0][0],
+        CypherValue::List((3..6).map(CypherValue::Integer).collect())
+    );
+    assert_eq!(
+        bfs[0][1],
+        CypherValue::List(vec![CypherValue::String("NEXT".into()); 2])
+    );
+    let dfs = ok(
+        &mut g,
+        "MATCH (s:P {id: 0}) CALL gds.dfs.stream('t', {sourceNode: s}) YIELD nodeIds \
+         RETURN [n IN nodeIds | gds.util.asNode(n).id]",
+    );
+    assert_eq!(
+        dfs,
+        [[CypherValue::List(
+            (0..6).map(CypherValue::Integer).collect()
+        )]]
+    );
+    let bf = ok(
+        &mut g,
+        "MATCH (s:P {id: 0}) CALL gds.bellmanFord.stream('t', \
+              {sourceNode: s, relationshipWeightProperty: 'w'}) \
+         YIELD targetNode, totalCost, route, isNegativeCycle \
+         RETURN gds.util.asNode(targetNode).id AS t, totalCost, length(route), isNegativeCycle \
+         ORDER BY t",
+    );
+    assert_eq!(bf.len(), 6);
+    assert_eq!(
+        bf[0],
+        [
+            CypherValue::Integer(0),
+            CypherValue::Float(0.0),
+            CypherValue::Integer(0),
+            CypherValue::Bool(false)
+        ]
+    );
+    assert_eq!(bf[5][1], CypherValue::Float(9.0));
+    let ar = one(
+        &mut g,
+        "MATCH (n:P {id: 0}) CALL gds.articleRank.stream('t') YIELD nodeId, score \
+         WHERE nodeId = id(n) RETURN round(score * 10000) / 10000",
+    );
+    assert_eq!(ar, CypherValue::Float(0.2149));
+    ok(
+        &mut g,
+        "CALL gds.pageRank.mutate('t', {mutateProperty: 'pr'}) YIELD nodePropertiesWritten",
+    );
+    let pr = one(
+        &mut g,
+        "MATCH (n:P {id: 3}) CALL gds.graph.nodeProperty.stream('t', 'pr') \
+         YIELD nodeId, propertyValue WHERE nodeId = id(n) RETURN round(propertyValue * 1000) / 1000",
+    );
+    assert_eq!(pr, CypherValue::Float(1.536));
 }

@@ -69,7 +69,8 @@ pub(super) fn neighbor_sets_oriented(
                             }
                         });
                     }
-                    if want_in {
+                    // an undirected projection lists both directions as out already
+                    if want_in && !(want_out && graph.is_undirected()) {
                         graph.for_each_in(v, &mut |u, _eid, _w| {
                             if u != v {
                                 list.push(u.0 as u32);

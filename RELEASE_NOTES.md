@@ -4,11 +4,23 @@ All notable changes to Traverse are documented in this file.
 
 ---
 
-## Unreleased
+## 0.9.1 - unreleased
+
+### Query engine
+
+- **Vectorized execution.** Queries run on typed vectors and factorized chunks, every pipeline split into morsels across the thread pool; counts and aggregates are served from the storage where the plan allows.
+- **Storage.** Nodes and relationships are laid out by id, with typed property columns built on demand. A file that gains property-less relationships is written in format version 8, which earlier releases cannot open; existing files open as before.
+- **Bulk import.** The embedded bulk writer loads nodes and relationships from CSV natively and builds the adjacency in parallel.
+- **Pattern semantics.** One `MATCH` binds a relationship at most once across all its parts, including the parts the planner splits at a bound node.
+
+### GDS
+
+- `UNDIRECTED` projections, single-source paths that stream the source and take a scaler, `allShortestPaths.dijkstra`, and a direction-optimizing BFS.
 
 ### Embedded bindings
 
 - **macOS on Apple silicon.** The embedded packages carry a native library for `aarch64-apple-darwin`: `@truespar/traverse-node-darwin-arm64` for Node.js, `runtimes/osx-arm64` in the `Traverse.Embedded` NuGet package, the jar for Java, a macOS wheel for Python and `traverse-ffi-<version>-aarch64-macos.tar.gz` on the GitHub release for Go and C. On a Mac with Apple silicon, .NET no longer needs `TRAVERSE_FFI_LIB`, Java no longer needs `TRAVERSE_JAVA_LIB` and Node.js no longer needs `NAPI_RS_NATIVE_LIBRARY_PATH`; Go still loads the library from `TRAVERSE_FFI_LIB`, the executable's directory or the system library path.
+- **Python.** `QueryResult.values()` gives the rows as tuples; dict rows share their keys.
 
 ---
 

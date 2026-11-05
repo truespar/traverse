@@ -1,6 +1,6 @@
 {
   "name": "@truespar/traverse-wasm",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "Traverse graph engine in a browser tab - Cypher + 32 GDS algorithms via WebAssembly. Runs in a dedicated Web Worker; no server required.",
   "license": "MIT OR Apache-2.0",
   "type": "module",

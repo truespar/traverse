@@ -238,7 +238,10 @@ impl GraphAlgorithm for FastRP {
             }
             let mut sum = 0.0;
             graph.for_each_out(v, &mut |_u, _eid, w| sum += w);
-            graph.for_each_in(v, &mut |_u, _eid, w| sum += w);
+            // an undirected projection lists both directions as out already
+            if !graph.is_undirected() {
+                graph.for_each_in(v, &mut |_u, _eid, w| sum += w);
+            }
             weighted_deg[vi] = sum;
         }
 
@@ -324,7 +327,10 @@ impl GraphAlgorithm for FastRP {
                         }
                         _ => {
                             graph.for_each_out(v, &mut |u, _eid, w| sweep(u, w as f32));
-                            graph.for_each_in(v, &mut |u, _eid, w| sweep(u, w as f32));
+                            // an undirected projection lists both directions as out already
+                            if !graph.is_undirected() {
+                                graph.for_each_in(v, &mut |u, _eid, w| sweep(u, w as f32));
+                            }
                         }
                     }
                     // L2 normalize

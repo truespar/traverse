@@ -1088,9 +1088,9 @@ pub fn call_function(name: &str, args: &[CypherValue]) -> Result<CypherValue, Cy
             };
             Ok(CypherValue::Float(dist))
         }
-        // `file()` / `linenumber()` are LOAD CSV helpers that `eval_expr` intercepts first (they
-        // need the frame's hidden CSV-context slot). Reaching here means a direct call_function
-        // call without that context (e.g. a bytecode compile-time stub): NULL
+        // `file()` / `linenumber()` are LOAD CSV helpers the compiled expression resolves first
+        // (they need the row's hidden CSV-context column). Reaching here means a direct
+        // call_function call without that context: NULL
         "file" | "linenumber" => {
             check_arity(name, args, 0)?;
             Ok(CypherValue::Null)

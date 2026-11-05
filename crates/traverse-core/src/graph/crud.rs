@@ -6,6 +6,8 @@ use smallvec::SmallVec;
 
 use crate::error::{Error, Result};
 
+use super::adjacency::AdjacencyStore;
+use super::columns::Entity;
 use super::edge::Edge;
 use super::node::Node;
 use super::property::{PropertyMap, PropertyValue};
@@ -42,15 +44,20 @@ impl Graph {
         let interned_props = self.intern_property_map(properties);
 
         let prop_bytes = interned_props.data_len();
+        self.unlabeled += usize::from(label_ids.is_empty());
         let node = Node {
             id,
             labels: label_ids,
             properties: interned_props,
         };
 
-        self.nodes.insert(id, node);
+        if let Some(replaced) = self.nodes.insert(id, node) {
+            self.unlabeled -= usize::from(replaced.labels.is_empty());
+        }
 
-        self.dirty_nodes.insert(id);
+        if !self.bulk {
+            self.dirty_nodes.insert(id);
+        }
         if !labels.is_empty() {
             self.strings_dirty = true;
         }
@@ -193,6 +200,7 @@ impl Graph {
             return Err(Error::DuplicateLabel(id, label.to_owned()));
         }
 
+        self.unlabeled -= usize::from(node.labels.is_empty());
         node.labels.push(lid);
         self.label_index.entry(lid).or_default().insert(id);
         self.dirty_nodes.insert(id);
@@ -228,6 +236,7 @@ impl Graph {
         let pos = node.labels.iter().position(|l| *l == lid).unwrap();
 
         node.labels.remove(pos);
+        self.unlabeled += usize::from(node.labels.is_empty());
         if let Some(set) = self.label_index.get_mut(&lid) {
             set.remove(&id);
             if set.is_empty() {
@@ -274,9 +283,11 @@ impl Graph {
             });
         }
         self.remove_node_from_indexes(id);
+        self.columns.removed(Entity::Node, id.0 as usize);
 
         let node = self.nodes.remove(&id).unwrap();
         let label_count = node.labels.len();
+        self.unlabeled -= usize::from(label_count == 0);
         let prop_bytes = node.properties.data_len();
         for lid in &node.labels {
             if let Some(set) = self.label_index.get_mut(lid) {
@@ -303,13 +314,16 @@ impl Graph {
     /// index entries.
     pub fn restore_node(&mut self, node: Node) {
         let id = node.id;
+        self.unlabeled += usize::from(node.labels.is_empty());
         for &lid in &node.labels {
             self.label_index.entry(lid).or_default().insert(id);
         }
         for kid in node.properties.keys() {
             self.known_prop_keys.insert(kid);
         }
-        self.nodes.insert(id, node);
+        if let Some(replaced) = self.nodes.insert(id, node) {
+            self.unlabeled -= usize::from(replaced.labels.is_empty());
+        }
         self.dirty_nodes.insert(id);
         self.deleted_nodes.remove(&id);
         self.add_node_to_indexes(id);
@@ -348,6 +362,9 @@ impl Graph {
         };
         self.adj_out.push(source, out_ep);
         self.adj_in.push(target, in_ep);
+        if source == target {
+            self.loops += 1;
+        }
         self.edge_type_index
             .entry(edge_type)
             .or_default()
@@ -445,16 +462,144 @@ impl Graph {
         };
         self.adj_out.push(source, out_ep);
         self.adj_in.push(target, in_ep);
+        if source == target {
+            self.loops += 1;
+        }
         self.edge_type_index.entry(type_id).or_default().insert(id);
 
         self.add_edge_to_indexes(id, type_id);
 
-        self.dirty_edges.insert(id);
+        if !self.bulk {
+            self.dirty_edges.insert(id);
+        }
         self.strings_dirty = true;
 
         self.estimated_memory += EDGE_BASE_COST + ADJ_ENTRY_COST + prop_bytes * PROPERTY_BYTE;
 
         Ok(id)
+    }
+
+    /// Creates one node per property map, every one with `labels`, with consecutive ids from
+    /// the returned one.
+    pub fn bulk_nodes(&mut self, labels: &[&str], props: Vec<PropertyMap>) -> NodeId {
+        let first = self.ids.reserve_nodes(props.len() as u64);
+        for (i, p) in props.into_iter().enumerate() {
+            let id = NodeId(first.0 + i as u64);
+            self.create_node_with_id(id, labels, p);
+            events::record(events::GraphEvent::NodeCreated(id));
+        }
+        first
+    }
+
+    /// Creates an edge of `edge_type` without properties per `(source, target)` pair, with
+    /// consecutive ids from the returned one; what a single creation books per edge is booked
+    /// once per call. Every endpoint must exist.
+    pub fn bulk_edges(&mut self, edge_type: &str, pairs: &[(NodeId, NodeId)]) -> Result<EdgeId> {
+        for &(s, t) in pairs {
+            if !self.nodes.contains_key(&s) {
+                return Err(Error::SourceNodeNotFound(s));
+            }
+            if !self.nodes.contains_key(&t) {
+                return Err(Error::TargetNodeNotFound(t));
+            }
+        }
+        let n = pairs.len();
+        let first = self.ids.reserve_edges(n as u64);
+        let type_id = EdgeTypeId(self.strings.intern(edge_type));
+        // property indexes and columns are only there to maintain once something made them
+        let maintain = self.edge_indexes.iter_prop().next().is_some()
+            || self.columns.gather(Entity::Edge).active();
+        let edge_at = |i: usize| EdgeId(first.0 + i as u64);
+        if self.adj_out.is_empty() && self.adj_in.is_empty() {
+            // the first edges of the graph: packed lists straight from the pairs
+            let bound = self.ids.node_bound();
+            let (out, inc) = rayon::join(
+                || {
+                    AdjacencyStore::try_from_edges(
+                        || {
+                            pairs
+                                .iter()
+                                .enumerate()
+                                .map(|(i, &(s, t))| (s, edge_at(i), type_id, t))
+                        },
+                        bound,
+                    )
+                },
+                || {
+                    AdjacencyStore::try_from_edges(
+                        || {
+                            pairs
+                                .iter()
+                                .enumerate()
+                                .map(|(i, &(s, t))| (t, edge_at(i), type_id, s))
+                        },
+                        bound,
+                    )
+                },
+            );
+            self.adj_out = out?;
+            self.adj_in = inc?;
+        } else {
+            let out: Vec<(NodeId, EdgeEndpointStored)> = pairs
+                .iter()
+                .enumerate()
+                .map(|(i, &(s, t))| {
+                    (
+                        s,
+                        EdgeEndpointStored {
+                            edge_id: edge_at(i),
+                            edge_type: type_id,
+                            neighbor: t,
+                        },
+                    )
+                })
+                .collect();
+            self.adj_out.push_many(&out);
+            drop(out);
+            let inc: Vec<(NodeId, EdgeEndpointStored)> = pairs
+                .iter()
+                .enumerate()
+                .map(|(i, &(s, t))| {
+                    (
+                        t,
+                        EdgeEndpointStored {
+                            edge_id: edge_at(i),
+                            edge_type: type_id,
+                            neighbor: s,
+                        },
+                    )
+                })
+                .collect();
+            self.adj_in.push_many(&inc);
+        }
+        for (i, &(s, t)) in pairs.iter().enumerate() {
+            let id = edge_at(i);
+            self.propless.insert(
+                id,
+                ProplessEdge {
+                    edge_type: type_id,
+                    source: s,
+                    target: t,
+                },
+            );
+            if s == t {
+                self.loops += 1;
+            }
+            if maintain {
+                self.add_edge_to_indexes(id, type_id);
+            }
+            if !self.bulk {
+                self.dirty_edges.insert(id);
+            }
+            events::record(events::GraphEvent::EdgeCreated(id));
+        }
+        let set = self.edge_type_index.entry(type_id).or_default();
+        for i in 0..n as u64 {
+            set.insert(EdgeId(first.0 + i));
+        }
+        self.strings_dirty = true;
+        self.estimated_memory += n * (EDGE_BASE_COST + ADJ_ENTRY_COST);
+        Ok(first)
     }
 
     /// Edge by ID: `Cow::Borrowed` if it has properties, `Cow::Owned` synthesized for property-less
@@ -570,6 +715,7 @@ impl Graph {
         if let Some(type_id) = edge_type_for_idx {
             self.remove_edge_from_indexes(id, type_id);
         }
+        self.columns.removed(Entity::Edge, id.0 as usize);
 
         let (source, target, edge_type, prop_bytes) = if let Some(edge) = self.edges.remove(&id) {
             let pb = edge.properties.data_len();
@@ -582,6 +728,9 @@ impl Graph {
 
         self.adj_out.remove(source, id);
         self.adj_in.remove(target, id);
+        if source == target {
+            self.loops = self.loops.saturating_sub(1);
+        }
         if let Some(set) = self.edge_type_index.get_mut(&edge_type) {
             set.remove(&id);
             if set.is_empty() {

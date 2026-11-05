@@ -7,16 +7,9 @@ use std::collections::{HashMap, HashSet};
 use crate::error::CypherError;
 use crate::types::CypherValue;
 
-use super::comprehension::clear_comprehension_caches;
-use super::plan_cache::clear_pointer_plans;
-
 thread_local! {
     /// [`cached_regex`]: patterns as written, for searching.
     static REGEX_CACHE: RefCell<HashMap<String, regex::Regex>> = RefCell::new(HashMap::new());
-    /// [`regex_full_match`]: the same patterns anchored at both ends. Kept apart so `=~` and
-    /// `apoc.text.*` never get each other's compiled form for the same pattern text.
-    static FULL_MATCH_REGEX_CACHE: RefCell<HashMap<String, regex::Regex>> =
-        RefCell::new(HashMap::new());
 }
 
 /// Compiles a regex through the persistent content-keyed cache. `regex::Regex` clones share the
@@ -34,52 +27,17 @@ pub(crate) fn cached_regex(pattern: &str) -> Result<regex::Regex, CypherError> {
     })
 }
 
-/// Cypher `=~`: does `pattern` match all of `s`? `Regex::is_match` finds substrings, so the
-/// pattern runs as `^(?:pattern)$` (the group keeps alternations like `a|b` anchored at both
-/// ends): `'hello world' =~ 'hello'` is false, as in Neo4j.
-pub(super) fn regex_full_match(pattern: &str, s: &str) -> Result<bool, CypherError> {
-    FULL_MATCH_REGEX_CACHE.with(|cache| {
-        let mut c = cache.borrow_mut();
-        if let Some(re) = c.get(pattern) {
-            return Ok(re.is_match(s));
-        }
-        let re = regex::Regex::new(&format!("^(?:{pattern})$"))
-            .map_err(|e| CypherError::type_error(format!("invalid regex: {e}")))?;
-        let hit = re.is_match(s);
-        c.insert(pattern.to_string(), re);
-        Ok(hit)
-    })
-}
-
-/// Any query parameters bound?
-pub(super) fn has_query_params() -> bool {
-    crate::query::with_current(|c| c.is_some_and(|ctx| !ctx.params().is_empty()))
-}
-
 /// Per-thread cleanup after an execution.
 pub fn end_execution() {
     // the regex caches are content-keyed: kept across queries so hot patterns compile once,
     // size-capped against pattern churn
-    for cache in [&REGEX_CACHE, &FULL_MATCH_REGEX_CACHE] {
-        cache.with(|c| {
-            let mut cache = c.borrow_mut();
-            if cache.len() > 256 {
-                cache.clear();
-            }
-        });
-    }
-    // pointer-keyed plans are only valid while this execution's AST lives
-    clear_pointer_plans();
-    crate::operators::load_csv::reset_csv_stack();
-}
-
-/// Invalidates POINTER-keyed per-execution caches. Must run at the start of every
-/// top-level execution: keys are AST addresses, and a freed AST from the previous
-/// query can alias the new one's nodes (a pattern comprehension once inherited a
-/// stale cached plan that way). The content-keyed caches survive and refill these cheaply.
-pub(crate) fn reset_pointer_caches() {
-    clear_pointer_plans();
-    clear_comprehension_caches();
+    REGEX_CACHE.with(|c| {
+        let mut cache = c.borrow_mut();
+        if cache.len() > 256 {
+            cache.clear();
+        }
+    });
+    crate::vex::ops::load_csv::reset_csv_stack();
 }
 
 /// Query parameter names (implicit CALL argument validation).

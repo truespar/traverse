@@ -7,6 +7,8 @@
 
 mod access;
 pub mod adjacency;
+pub mod batch;
+mod columns;
 pub mod compact_props;
 pub mod constraint;
 mod crud;
@@ -26,6 +28,7 @@ mod schema;
 mod search_index;
 pub mod spatial;
 pub mod stats;
+pub mod table;
 #[cfg(test)]
 mod tests;
 pub mod text;
@@ -49,6 +52,7 @@ use self::edge::Edge;
 use self::index::{EdgeIndexCatalog, EdgeIndexRegistry, IndexCatalog, IndexRegistry};
 use self::node::Node;
 use self::stats::GraphStatistics;
+use self::table::{IdSet, IdTable};
 use self::types::{EdgeId, EdgeTypeId, LabelId, NodeId, PropertyKeyId};
 
 pub(crate) use parts::COMPOSITE_PROP_SEP;
@@ -174,6 +178,21 @@ impl IdCounters {
         EdgeId(self.edge.fetch_add(1, Ordering::Relaxed))
     }
 
+    /// One past the highest node id handed out.
+    pub(crate) fn node_bound(&self) -> u64 {
+        self.node.load(Ordering::Relaxed)
+    }
+
+    /// `n` fresh consecutive node ids, the first returned.
+    pub(crate) fn reserve_nodes(&self, n: u64) -> NodeId {
+        NodeId(self.node.fetch_add(n, Ordering::Relaxed))
+    }
+
+    /// `n` fresh consecutive edge ids, the first returned.
+    pub(crate) fn reserve_edges(&self, n: u64) -> EdgeId {
+        EdgeId(self.edge.fetch_add(n, Ordering::Relaxed))
+    }
+
     fn bump_node(&self, used: NodeId) {
         self.node.fetch_max(used.0 + 1, Ordering::Relaxed);
     }
@@ -189,13 +208,13 @@ impl IdCounters {
 /// secondary indexes. Tracks dirty and deleted entities for incremental flush.
 #[derive(Debug)]
 pub struct Graph {
-    nodes: FxHashMap<NodeId, Node>,
-    edges: FxHashMap<EdgeId, Edge>,
-    propless: FxHashMap<EdgeId, ProplessEdge>,
+    nodes: IdTable<NodeId, Node>,
+    edges: IdTable<EdgeId, Edge>,
+    propless: IdTable<EdgeId, ProplessEdge>,
     adj_out: AdjacencyStore,
     adj_in: AdjacencyStore,
-    label_index: FxHashMap<LabelId, FxHashSet<NodeId>>,
-    edge_type_index: FxHashMap<EdgeTypeId, FxHashSet<EdgeId>>,
+    label_index: FxHashMap<LabelId, IdSet<NodeId>>,
+    edge_type_index: FxHashMap<EdgeTypeId, IdSet<EdgeId>>,
     strings: SharedStrings,
     indexes: IndexRegistry,
     edge_indexes: EdgeIndexRegistry,
@@ -220,6 +239,16 @@ pub struct Graph {
     pub(crate) edge_delta_heads: FxHashMap<EdgeId, AtomicPtr<MvccDelta>>,
     /// Created-id runs and ghost memberships beside the chains. Not serialized.
     versions: crate::tx::versions::Versions,
+    /// Typed property columns over the id prefix. Rebuilt on demand, never serialized.
+    columns: columns::ColumnSet,
+    /// Edges whose two ends are the same node.
+    loops: usize,
+    /// Nodes without a label: none means the label indexes on a property cover every node (see
+    /// [`property_seek`](Self::property_seek)).
+    unlabeled: usize,
+    /// A bulk load into a database with no file yet: new records skip the dirty sets, since the
+    /// first save rewrites the file whole.
+    bulk: bool,
 }
 
 impl Clone for Graph {
@@ -253,6 +282,10 @@ impl Clone for Graph {
             node_delta_heads: FxHashMap::default(),
             edge_delta_heads: FxHashMap::default(),
             versions: Default::default(),
+            columns: columns::ColumnSet::new(),
+            loops: self.loops,
+            unlabeled: self.unlabeled,
+            bulk: false,
         }
     }
 }
@@ -293,9 +326,9 @@ impl Graph {
     /// Creates a new, empty graph.
     pub fn new() -> Self {
         Self {
-            nodes: FxHashMap::default(),
-            edges: FxHashMap::default(),
-            propless: FxHashMap::default(),
+            nodes: IdTable::new(),
+            edges: IdTable::new(),
+            propless: IdTable::new(),
             adj_out: AdjacencyStore::new(),
             adj_in: AdjacencyStore::new(),
             label_index: FxHashMap::default(),
@@ -320,6 +353,10 @@ impl Graph {
             node_delta_heads: FxHashMap::default(),
             edge_delta_heads: FxHashMap::default(),
             versions: Default::default(),
+            columns: columns::ColumnSet::new(),
+            loops: 0,
+            unlabeled: 0,
+            bulk: false,
         }
     }
 
@@ -370,7 +407,7 @@ impl Graph {
 
     /// Returns the estimated memory usage in bytes.
     pub fn estimated_memory(&self) -> usize {
-        self.estimated_memory
+        self.estimated_memory + self.columns.bytes()
     }
 
     /// Per-structure memory breakdown.
@@ -419,7 +456,7 @@ impl Graph {
         let label_idx_size: usize = self
             .label_index
             .values()
-            .map(|set| set.capacity() * size_of::<NodeId>() + set.capacity() + 16)
+            .map(|set| set.memory_usage() + 16)
             .sum();
         out.push(("label_index".into(), label_idx_size));
 
@@ -427,7 +464,7 @@ impl Graph {
         let edge_type_idx_size: usize = self
             .edge_type_index
             .values()
-            .map(|set| set.capacity() * size_of::<EdgeId>() + set.capacity() + 16)
+            .map(|set| set.memory_usage() + 16)
             .sum();
         out.push(("edge_type_index".into(), edge_type_idx_size));
 
@@ -440,6 +477,7 @@ impl Graph {
             })
             .sum();
         out.push(("node_prop_indexes".into(), prop_idx_size));
+        out.push(("prop_columns".into(), self.columns.bytes()));
 
         // edge property indexes
         let edge_prop_idx_size: usize = self
@@ -463,6 +501,12 @@ impl Graph {
             || !self.deleted_nodes.is_empty()
             || !self.deleted_edges.is_empty()
             || self.strings_dirty
+    }
+
+    /// Bulk load into a database with no file yet: records created while this is on skip the
+    /// dirty sets, since the first save rewrites the file whole.
+    pub fn set_bulk(&mut self, on: bool) {
+        self.bulk = on;
     }
 
     /// Takes the dirty set, leaving the graph's tracking state cleared.

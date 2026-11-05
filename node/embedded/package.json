@@ -1,6 +1,6 @@
 {
   "name": "@truespar/traverse-node",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "license": "MIT OR Apache-2.0",
   "description": "Embedded Traverse graph database for Node.js: the engine in your process, no server",
   "keywords": [

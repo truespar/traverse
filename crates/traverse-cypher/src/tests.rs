@@ -54,6 +54,25 @@ fn strip_literals_keeps_qpp_quantifiers() {
 }
 
 #[test]
+fn strip_literals_keeps_fixed_lengths() {
+    // `*2` is grammar like `*1..2`; a placeholder there is a syntax error
+    for q in [
+        "MATCH (a)-[:R*2]->(b) WHERE a.x = 7 RETURN b",
+        "MATCH (a)-[r*2 {w: 7}]->(b) RETURN b",
+    ] {
+        let (stripped, params) = strip_literals(q).unwrap();
+        assert!(
+            stripped.contains("*2"),
+            "fixed length must survive: {stripped}"
+        );
+        assert_eq!(params.len(), 1, "7 strips: {stripped}");
+        crate::parse(&stripped).unwrap_or_else(|e| panic!("{stripped}: {e}"));
+    }
+    let (stripped, params) = strip_literals("RETURN 3 * 2 AS x").unwrap();
+    assert_eq!(params.len(), 2, "arithmetic strips: {stripped}");
+}
+
+#[test]
 fn strip_literals_keeps_selector_counts() {
     let (s, params) =
         strip_literals("MATCH p = SHORTEST 3 (:A {x: 7})-[:L]->+(:B) RETURN length(p)").unwrap();

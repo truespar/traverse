@@ -80,6 +80,9 @@ const RECORD_FLAG_LZ4: u8 = 0x01;
 /// Record flag of a slot's stub for a record continued on overflow pages (`storage::overflow`);
 /// never one [`encode_record`] makes.
 pub(crate) const RECORD_FLAG_OVERFLOW: u8 = 0x02;
+/// Record flag of a property-less relationship in its fixed layout (`storage::codec`); never
+/// one [`encode_record`] makes.
+pub(crate) const RECORD_FLAG_PROPLESS_EDGE: u8 = 0x03;
 
 /// Prefixes a record with a 1-byte flag: `0x01` + LZ4 data when that's smaller, else `0x00` + raw
 /// data.
@@ -106,6 +109,9 @@ pub fn decode_record(data: &[u8]) -> Result<Aligned> {
         Some(&RECORD_FLAG_LZ4) => decompress(&data[1..]),
         Some(&RECORD_FLAG_OVERFLOW) => Err(Error::Decompression(
             "record continues on overflow pages; read it through them".into(),
+        )),
+        Some(&RECORD_FLAG_PROPLESS_EDGE) => Err(Error::Decompression(
+            "a fixed-layout relationship record; read it as one".into(),
         )),
         Some(flag) => Err(Error::Decompression(format!(
             "unknown record flag: {flag:#04x}"

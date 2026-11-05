@@ -22,7 +22,7 @@
 //! Sizes are estimates (slot width plus the heap a value owns), not allocator
 //! truth, the same trade-off as Neo4j's `HeapEstimator`: conservative enough to
 //! stop a runaway query well before the machine is at risk, cheap enough per
-//! buffered row (one pass over the frame, one atomic add per 256 KiB).
+//! buffered row (one pass over the chunk, one atomic add per 256 KiB).
 //!
 //! The tracker lives in the running query's [`QueryContext`], so it reaches
 //! rayon workers and nested executions the same way the deadline does.
@@ -31,7 +31,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use crate::error::CypherError;
-use crate::frame::{Frame, SlotValue};
 use crate::query::QueryContext;
 use crate::types::CypherValue;
 
@@ -246,19 +245,6 @@ pub fn parse_byte_size(s: &str) -> Option<usize> {
 
 // -- Size estimation ---------------------------------------------------
 
-/// Estimated bytes of a frame: slot vector plus the heap its values own. Node/edge refs are inline;
-/// only `Heap` slots recurse.
-#[inline]
-pub fn frame_bytes(frame: &Frame) -> usize {
-    let mut bytes = std::mem::size_of::<Frame>() + frame.len() * std::mem::size_of::<SlotValue>();
-    for slot in frame.iter() {
-        if let SlotValue::Heap(v) = slot {
-            bytes += std::mem::size_of::<CypherValue>() + value_heap_bytes(v);
-        }
-    }
-    bytes
-}
-
 /// Estimated bytes a value owns beyond its inline size: string/byte payloads, list and map elements
 /// (recursively), materialized node/edge properties.
 pub fn value_heap_bytes(v: &CypherValue) -> usize {
@@ -385,144 +371,6 @@ impl Drop for Charge {
     }
 }
 
-/// `Vec<Frame>` whose growth is charged to the running query. Derefs to a slice for reading; growth
-/// goes through [`push`](Self::push) (which may fail with the memory-limit error), so no row enters
-/// unaccounted. Released when the buffer, or its [`into_iter`](IntoIterator::into_iter) iterator,
-/// drops.
-#[derive(Debug, Default)]
-pub struct RowBuffer {
-    frames: Vec<Frame>,
-    charge: Charge,
-}
-
-impl RowBuffer {
-    /// Empty buffer charged to the current query.
-    pub fn new() -> Self {
-        Self {
-            frames: Vec::new(),
-            charge: Charge::new(),
-        }
-    }
-
-    /// Empty buffer with room for `cap` frames.
-    pub fn with_capacity(cap: usize) -> Self {
-        Self {
-            frames: Vec::with_capacity(cap),
-            charge: Charge::new(),
-        }
-    }
-
-    /// Appends a frame, charging its estimated size.
-    #[inline]
-    pub fn push(&mut self, frame: Frame) -> Result<(), CypherError> {
-        self.charge.add(frame_bytes(&frame))?;
-        self.frames.push(frame);
-        Ok(())
-    }
-
-    /// Appends every frame of `frames`.
-    pub fn extend<I: IntoIterator<Item = Frame>>(&mut self, frames: I) -> Result<(), CypherError> {
-        for f in frames {
-            self.push(f)?;
-        }
-        Ok(())
-    }
-
-    /// Adopts frames charged separately (a builder that charged per push into a plain vector).
-    pub(crate) fn from_parts(frames: Vec<Frame>, charge: Charge) -> Self {
-        Self { frames, charge }
-    }
-
-    /// Takes an already-built vector, charging it at once.
-    pub fn from_vec(frames: Vec<Frame>) -> Result<Self, CypherError> {
-        let mut charge = Charge::new();
-        for f in &frames {
-            charge.add(frame_bytes(f))?;
-        }
-        charge.flush()?;
-        Ok(Self { frames, charge })
-    }
-
-    /// Frame count.
-    pub fn len(&self) -> usize {
-        self.frames.len()
-    }
-
-    /// No frames?
-    pub fn is_empty(&self) -> bool {
-        self.frames.is_empty()
-    }
-
-    /// Gives up the frames *and the accounting*: the tracker no longer sees them. Only where the
-    /// vector is consumed right away.
-    pub fn into_vec(self) -> Vec<Frame> {
-        // `Charge::drop` releases; moving the frames out first is fine
-        let mut this = self;
-        std::mem::take(&mut this.frames)
-    }
-
-    /// Bytes charged for this buffer.
-    pub fn bytes(&self) -> usize {
-        self.charge.bytes()
-    }
-}
-
-impl std::ops::Deref for RowBuffer {
-    type Target = [Frame];
-    #[inline]
-    fn deref(&self) -> &[Frame] {
-        &self.frames
-    }
-}
-
-impl std::ops::DerefMut for RowBuffer {
-    #[inline]
-    fn deref_mut(&mut self) -> &mut [Frame] {
-        &mut self.frames
-    }
-}
-
-impl IntoIterator for RowBuffer {
-    type Item = Frame;
-    type IntoIter = RowBufferIntoIter;
-    fn into_iter(self) -> RowBufferIntoIter {
-        let mut this = self;
-        let frames = std::mem::take(&mut this.frames);
-        let charge = std::mem::take(&mut this.charge);
-        RowBufferIntoIter {
-            inner: frames.into_iter(),
-            _charge: charge,
-        }
-    }
-}
-
-impl<'a> IntoIterator for &'a RowBuffer {
-    type Item = &'a Frame;
-    type IntoIter = std::slice::Iter<'a, Frame>;
-    fn into_iter(self) -> Self::IntoIter {
-        self.frames.iter()
-    }
-}
-
-/// Consuming iterator over a [`RowBuffer`]; keeps the charge until dropped.
-pub struct RowBufferIntoIter {
-    inner: std::vec::IntoIter<Frame>,
-    _charge: Charge,
-}
-
-impl Iterator for RowBufferIntoIter {
-    type Item = Frame;
-    #[inline]
-    fn next(&mut self) -> Option<Frame> {
-        self.inner.next()
-    }
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.inner.size_hint()
-    }
-}
-
-impl ExactSizeIterator for RowBufferIntoIter {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -579,22 +427,6 @@ mod tests {
         let err = charge(4096).unwrap_err().to_string();
         assert!(err.contains("memory limit"), "{err}");
         assert!(err.contains("TRAVERSE_QUERY_MEMORY_LIMIT"), "{err}");
-    }
-
-    #[test]
-    fn row_buffer_tracks_and_releases() {
-        let _scope = crate::query::enter();
-        let frame = Frame::from_vec(vec![SlotValue::Integer(1); 4]);
-        let mut buf = RowBuffer::new();
-        for _ in 0..10 {
-            buf.push(frame.clone()).unwrap();
-        }
-        assert_eq!(buf.len(), 10);
-        assert!(buf.bytes() >= 10 * frame_bytes(&frame));
-        let it = buf.into_iter();
-        assert_eq!(it.len(), 10);
-        drop(it);
-        assert_eq!(used(), 0);
     }
 
     #[test]

@@ -72,6 +72,21 @@ pub trait AlgorithmGraph: Send + Sync {
         None
     }
 
+    /// The neighbors `for_each_in` visits, as the projection's own dense-id CSR arrays: node `i`'s
+    /// are its row in the first adjacency, then its row in the second if there is one (an
+    /// UNDIRECTED projection's natural out- and in-lists). `None` when the projection keeps no
+    /// such arrays (the live view: `incoming_adj_slice` or `for_each_in`). For hot pull loops
+    /// (PageRank), which then make no call per node or relationship.
+    fn in_adjacency(&self) -> Option<(DenseAdjacency<'_>, Option<DenseAdjacency<'_>>)> {
+        None
+    }
+
+    /// [`Self::in_adjacency`] for the neighbors `for_each_out` visits (an UNDIRECTED projection's
+    /// natural out- and in-lists; else the out-list alone). For traversals' frontier scans.
+    fn out_adjacency(&self) -> Option<(DenseAdjacency<'_>, Option<DenseAdjacency<'_>>)> {
+        None
+    }
+
     /// Every projected edge weighs 1.0 (`WeightConfig::Unit`)? Lets algorithms take cheaper unit
     /// paths (BFS SSSP instead of delta-stepping, BFS spanning tree instead of Kruskal). Default
     /// `false`; concrete projections override.
@@ -103,6 +118,23 @@ pub trait AlgorithmGraph: Send + Sync {
         key: &str,
     ) -> Option<traverse_core::graph::property::PropertyValue> {
         self.graph().get_node_property(node, key).ok().flatten()
+    }
+}
+
+/// A dense-id CSR: node `i`'s neighbors are `targets[offsets[i]..offsets[i + 1]]`.
+#[derive(Clone, Copy)]
+pub struct DenseAdjacency<'a> {
+    /// Row starts, one per node plus the end.
+    pub offsets: &'a [u32],
+    /// Neighbor ids, row after row.
+    pub targets: &'a [u32],
+}
+
+impl<'a> DenseAdjacency<'a> {
+    /// Node `i`'s row.
+    #[inline]
+    pub fn neighbors(&self, i: usize) -> &'a [u32] {
+        &self.targets[self.offsets[i] as usize..self.offsets[i + 1] as usize]
     }
 }
 
@@ -372,6 +404,14 @@ impl AlgorithmGraph for AlgorithmGraphView<'_> {
     }
 
     fn out_degree(&self, node: NodeId) -> u32 {
+        // no filter: every entry counts (undirected skips self-loops, so it counts below)
+        if self.node_mask.is_none() && self.edge_type_filter.is_none() {
+            match self.orientation {
+                Orientation::Natural => return self.adj.outgoing(node).len() as u32,
+                Orientation::Reverse => return self.adj.incoming(node).len() as u32,
+                Orientation::Undirected => {}
+            }
+        }
         match self.orientation {
             Orientation::Natural => {
                 let mut k: u32 = 0;
@@ -398,6 +438,13 @@ impl AlgorithmGraph for AlgorithmGraphView<'_> {
     }
 
     fn in_degree(&self, node: NodeId) -> u32 {
+        if self.node_mask.is_none() && self.edge_type_filter.is_none() {
+            match self.orientation {
+                Orientation::Natural => return self.adj.incoming(node).len() as u32,
+                Orientation::Reverse => return self.adj.outgoing(node).len() as u32,
+                Orientation::Undirected => {}
+            }
+        }
         match self.orientation {
             Orientation::Natural => {
                 let mut k: u32 = 0;

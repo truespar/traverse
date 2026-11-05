@@ -132,6 +132,46 @@ impl AdjacencyStore {
         slots + edges + overlay
     }
 
+    /// No edges at all, packed or in the overlay?
+    pub fn is_empty(&self) -> bool {
+        self.slots.is_empty() && self.modified.is_none()
+    }
+
+    /// Appends many endpoints: grouped by node first (a counting sort), so a node's list is
+    /// found once per call rather than once per edge; a node's entries keep their input order.
+    pub fn push_many(&mut self, entries: &[(NodeId, EdgeEndpointStored)]) {
+        let Some(max) = entries.iter().map(|(n, _)| n.0 as usize).max() else {
+            return;
+        };
+        let mut start = vec![0u32; max + 2];
+        for (n, _) in entries {
+            start[n.0 as usize + 1] += 1;
+        }
+        for i in 1..start.len() {
+            start[i] += start[i - 1];
+        }
+        let mut cursor = start.clone();
+        let mut order = vec![0u32; entries.len()];
+        for (i, (n, _)) in entries.iter().enumerate() {
+            let c = &mut cursor[n.0 as usize];
+            order[*c as usize] = i as u32;
+            *c += 1;
+        }
+        let mut at = 0usize;
+        while at < order.len() {
+            let node = entries[order[at] as usize].0;
+            let idx = node.0 as u32;
+            let end = start[node.0 as usize + 1] as usize;
+            self.ensure_modified(idx);
+            let list = self.modified.as_deref_mut().unwrap().get_mut(&idx).unwrap();
+            list.reserve(end - at);
+            for &i in &order[at..end] {
+                list.push(AdjEntry::from_endpoint(&entries[i as usize].1));
+            }
+            at = end;
+        }
+    }
+
     /// Nodes whose lists live in the overlay (compaction policy input).
     pub fn overlay_len(&self) -> usize {
         self.modified.as_deref().map_or(0, |o| o.len())
