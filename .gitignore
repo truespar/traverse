@@ -62,10 +62,6 @@ java/http/target/
 
 # Scratch / temp working dirs
 tmp_examples/
-/tmp_test/
-/tmp_upload/
-/tmp_smoke/
-/tmp_src/
-/tmp_target/
+/tmp_*/
 java/http/tmp_examples
 studio/.vite/
