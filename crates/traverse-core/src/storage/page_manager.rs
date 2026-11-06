@@ -330,16 +330,6 @@ impl PageManager {
         Ok(())
     }
 
-    /// In memory there is no file to close.
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) fn detach_file(&mut self) {}
-
-    /// In memory there is no file to take.
-    #[cfg(target_arch = "wasm32")]
-    pub(crate) fn attach_file(&mut self, _path: &Path) -> Result<()> {
-        Ok(())
-    }
-
     /// File header.
     pub fn header(&self) -> &FileHeader {
         &self.header
@@ -473,13 +463,6 @@ impl PageManager {
         self.dirty.clear();
         self.wal_unapplied = false;
         Ok(())
-    }
-
-    /// See the native [`flush_new_file`](Self::flush_new_file); in memory there is nothing to
-    /// write.
-    #[cfg(target_arch = "wasm32")]
-    pub fn flush_new_file(&mut self) -> Result<()> {
-        self.flush()
     }
 
     /// After a failed [`flush`](Self::flush): whether it got past committing its WAL, i.e. its

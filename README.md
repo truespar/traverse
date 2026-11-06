@@ -221,8 +221,7 @@ db.close()
 **Go** (`go get github.com/truespar/traverse/go`). The package loads the native library from
 `TRAVERSE_FFI_LIB`, from the executable's directory or from the system library path; the
 [GitHub release](https://github.com/truespar/traverse/releases) has it for Windows and Linux x64
-and macOS on Apple silicon (`traverse-ffi-<version>-x86_64-windows.zip`,
-`traverse-ffi-<version>-x86_64-linux.tar.gz`, `traverse-ffi-<version>-aarch64-macos.tar.gz`).
+(`traverse-ffi-<version>-x86_64-windows.zip`, `traverse-ffi-<version>-x86_64-linux.tar.gz`).
 Property values are given as strings:
 
 ```go

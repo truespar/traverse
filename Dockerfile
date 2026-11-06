@@ -39,14 +39,23 @@ COPY --from=studio /src/crates/traverse-server/static/ crates/traverse-server/st
 # Full release feature set - matches the Windows/Linux release binaries
 # (`gql` is on by default for traverse-server). Without `ml` the
 # traverse.ml.pipeline.* procedures error with "not built with ml".
-RUN cargo build --release -p traverse-server --features grpc,tls,mcp,ml
+# The target dir and the crate registry are BuildKit cache mounts: a rebuild, or a build
+# cut short, compiles only what is missing. The binary is copied out of the mount because
+# the runtime stage cannot see it. CARGO_BUILD_JOBS caps the parallelism when the host
+# asks for it (--build-arg CARGO_BUILD_JOBS=4).
+ARG CARGO_BUILD_JOBS
+RUN --mount=type=cache,target=/src/target \
+    --mount=type=cache,target=/usr/local/cargo/registry \
+    cargo build --release -p traverse-server --features grpc,tls,mcp,ml \
+        ${CARGO_BUILD_JOBS:+--jobs $CARGO_BUILD_JOBS} \
+    && cp target/release/traverse-server /usr/local/bin/traverse-server
 
 # -- Runtime --------------------------------------------------
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /src/target/release/traverse-server /usr/local/bin/traverse-server
+COPY --from=builder /usr/local/bin/traverse-server /usr/local/bin/traverse-server
 COPY --chmod=0644 LICENSE LICENSE-MIT LICENSE-APACHE THIRD-PARTY-NOTICES /usr/share/doc/traverse/
 
 ENV TRAVERSE_LISTEN=0.0.0.0:7690

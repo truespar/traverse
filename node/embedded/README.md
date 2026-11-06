@@ -1,7 +1,7 @@
 # @truespar/traverse-node
 
 The Traverse graph database embedded in Node.js: the engine runs in your process, no server.
-Prebuilt for Windows x64, Linux x64 (glibc) and macOS on Apple silicon; Node.js 22 or later.
+Prebuilt for Windows x64 and Linux x64 (glibc); Node.js 22 or later.
 
 ```bash
 npm install @truespar/traverse-node
