@@ -122,6 +122,12 @@ fn try_extract_equi_join_key(
 /// comes from the DRIVING side (doesn't use `var`): the lookup join behind
 /// `UNWIND $rows AS r MATCH (a:L {id: r.a})` and correlated
 /// `MATCH ... MATCH (a:L) WHERE a.id = m.id + 1`, instead of an O(input x label) scan.
+///
+/// The Scan may also sit at the bottom of the sought side's pattern, under its expands and
+/// filters: `UNWIND $ids AS id MATCH (a:L {id: id})-[e]-(b:M)`. That shape used to miss the seek
+/// and become a HashJoin over the whole label expanded (~1 s for any handful of ids on a label of
+/// 3.3M nodes and 10M relationships, against ~10 ms with the start node in a MATCH of its own); the
+/// seek now replaces the Scan and the expands run on its rows.
 pub fn convert_cross_product_to_index_lookup_join(
     plan: LogicalPlan,
     hints: &IndexHints,
@@ -136,69 +142,61 @@ fn lookup_join_inner(plan: LogicalPlan, hints: &IndexHints) -> LogicalPlan {
     let LogicalPlan::CrossProduct { left, right } = *input else {
         return LogicalPlan::Filter { input, predicate };
     };
-    // the sought side must be a bare labeled Scan; the other drives
-    let (driving, scan_var, scan_label, scan_on_right) = match (&*left, &*right) {
-        (
-            _,
-            LogicalPlan::Scan {
-                variable,
-                label: Some(l),
-            },
-        ) => (left.clone(), variable.clone(), l.clone(), true),
-        (
-            LogicalPlan::Scan {
-                variable,
-                label: Some(l),
-            },
-            _,
-        ) => (right.clone(), variable.clone(), l.clone(), false),
-        _ => {
-            return LogicalPlan::Filter {
-                input: Box::new(LogicalPlan::CrossProduct { left, right }),
-                predicate,
-            };
-        }
-    };
-    let driving_vars = plan_output_variables(&driving);
 
-    // split the AND chain; find a usable `var.prop = key`
+    // split the AND chain once; each orientation looks for a usable `var.prop = key`
     let mut conjuncts = Vec::new();
     split_and_chain(&predicate, &mut conjuncts);
-    let mut chosen: Option<(usize, String, Expr)> = None;
-    for (i, c) in conjuncts.iter().enumerate() {
-        if let Some((prop, key)) = extract_eq_property_check_any(c, &scan_var) {
-            if !hints.contains(&(scan_label.clone(), prop.clone())) {
-                continue;
-            }
-            let mut key_vars = HashSet::new();
-            collect_expr_variables(&key, &mut key_vars);
-            // key must come from the driving side alone
-            if key_vars.contains(&scan_var) || !key_vars.is_subset(&driving_vars) {
-                continue;
-            }
-            // static keys are covered by convert_filter_to_index_scan + join ordering; only
-            // correlated keys here
-            if key_vars.is_empty() {
-                continue;
-            }
-            chosen = Some((i, prop, key));
+
+    // the sought side is a labeled Scan, bare or at the bottom of a pattern chain; the other
+    // drives. The right side first, as before, then the left
+    let mut found: Option<(bool, String, String, usize, String, Expr)> = None;
+    for sought_on_right in [true, false] {
+        let (sought, driving) = if sought_on_right {
+            (&*right, &*left)
+        } else {
+            (&*left, &*right)
+        };
+        let Some((scan_var, scan_label)) = chain_leaf_scan(sought) else {
+            continue;
+        };
+        let driving_vars = plan_output_variables(driving);
+        if let Some((idx, prop, key)) =
+            find_lookup_key(&conjuncts, scan_var, scan_label, &driving_vars, hints)
+        {
+            found = Some((
+                sought_on_right,
+                scan_var.to_string(),
+                scan_label.to_string(),
+                idx,
+                prop,
+                key,
+            ));
             break;
         }
     }
-    let Some((idx, prop, key)) = chosen else {
+    let Some((sought_on_right, scan_var, scan_label, idx, prop, key)) = found else {
         return LogicalPlan::Filter {
             input: Box::new(LogicalPlan::CrossProduct { left, right }),
             predicate,
         };
     };
-    let _ = scan_on_right;
-    let mut out = LogicalPlan::IndexLookupJoin {
-        input: driving,
-        variable: scan_var,
-        label: scan_label,
-        property: prop,
-        key,
+    let (driving, sought) = if sought_on_right {
+        (left, right)
+    } else {
+        (right, left)
     };
+    // the seek replaces the Scan at the bottom of the sought side; the pattern's expands and
+    // filters run on above it, per driving row
+    let mut out = replace_chain_leaf(
+        *sought,
+        LogicalPlan::IndexLookupJoin {
+            input: driving,
+            variable: scan_var,
+            label: scan_label,
+            property: prop,
+            key,
+        },
+    );
     // re-apply the other conjuncts; the chosen one is dropped since the seek enforces exactly
     // `var.prop = key`
     let rest: Vec<Expr> = conjuncts
@@ -216,6 +214,120 @@ fn lookup_join_inner(plan: LogicalPlan, hints: &IndexHints) -> LogicalPlan {
         };
     }
     out
+}
+
+/// The first conjunct `scan_var.prop = key` the lookup join can seek on: `(Label, prop)` indexed
+/// and `key` correlated, from the driving side alone. `(index, prop, key)`.
+fn find_lookup_key(
+    conjuncts: &[Expr],
+    scan_var: &str,
+    scan_label: &str,
+    driving_vars: &HashSet<String>,
+    hints: &IndexHints,
+) -> Option<(usize, String, Expr)> {
+    for (i, c) in conjuncts.iter().enumerate() {
+        let Some((prop, key)) = extract_eq_property_check_any(c, scan_var) else {
+            continue;
+        };
+        if !hints.contains(&(scan_label.to_string(), prop.clone())) {
+            continue;
+        }
+        let mut key_vars = HashSet::new();
+        collect_expr_variables(&key, &mut key_vars);
+        // key must come from the driving side alone
+        if key_vars.contains(scan_var) || !key_vars.is_subset(driving_vars) {
+            continue;
+        }
+        // static keys are covered by convert_filter_to_index_scan + join ordering; only
+        // correlated keys here
+        if key_vars.is_empty() {
+            continue;
+        }
+        return Some((i, prop, key));
+    }
+    None
+}
+
+/// The labeled Scan a sought side starts from: a bare `Scan(var:Label)`, or one at the bottom of
+/// a chain of Filters and expands, as `MATCH (a:L {id: r.a})-[e]-(b)` plans (the Scan of `a`
+/// under the expansion to `b` and the filters pushed onto it). Every operator in the chain has a
+/// single input and works row by row, keeping its input's columns, so it runs unchanged on the
+/// rows of an index lookup join in place of the Scan. `(var, Label)`, or None.
+fn chain_leaf_scan(plan: &LogicalPlan) -> Option<(&str, &str)> {
+    match plan {
+        LogicalPlan::Scan {
+            variable,
+            label: Some(l),
+        } => Some((variable.as_str(), l.as_str())),
+        LogicalPlan::Filter { input, .. }
+        | LogicalPlan::ExpandOut { input, .. }
+        | LogicalPlan::ExpandIn { input, .. }
+        | LogicalPlan::ExpandBoth { input, .. } => chain_leaf_scan(input),
+        _ => None,
+    }
+}
+
+/// The chain `chain_leaf_scan` accepted, with its Scan replaced by `leaf`.
+fn replace_chain_leaf(plan: LogicalPlan, leaf: LogicalPlan) -> LogicalPlan {
+    match plan {
+        LogicalPlan::Scan { .. } => leaf,
+        LogicalPlan::Filter { input, predicate } => LogicalPlan::Filter {
+            input: Box::new(replace_chain_leaf(*input, leaf)),
+            predicate,
+        },
+        LogicalPlan::ExpandOut {
+            input,
+            from,
+            rel_var,
+            to,
+            edge_types,
+            range,
+            prior_edge_vars,
+        } => LogicalPlan::ExpandOut {
+            input: Box::new(replace_chain_leaf(*input, leaf)),
+            from,
+            rel_var,
+            to,
+            edge_types,
+            range,
+            prior_edge_vars,
+        },
+        LogicalPlan::ExpandIn {
+            input,
+            from,
+            rel_var,
+            to,
+            edge_types,
+            range,
+            prior_edge_vars,
+        } => LogicalPlan::ExpandIn {
+            input: Box::new(replace_chain_leaf(*input, leaf)),
+            from,
+            rel_var,
+            to,
+            edge_types,
+            range,
+            prior_edge_vars,
+        },
+        LogicalPlan::ExpandBoth {
+            input,
+            from,
+            rel_var,
+            to,
+            edge_types,
+            range,
+            prior_edge_vars,
+        } => LogicalPlan::ExpandBoth {
+            input: Box::new(replace_chain_leaf(*input, leaf)),
+            from,
+            rel_var,
+            to,
+            edge_types,
+            range,
+            prior_edge_vars,
+        },
+        other => other,
+    }
 }
 
 #[recursive::recursive]

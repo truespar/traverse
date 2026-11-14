@@ -4,6 +4,14 @@ All notable changes to Traverse are documented in this file.
 
 ---
 
+## Unreleased
+
+### Query engine
+
+- **Index lookups from a pattern.** `UNWIND $ids AS id MATCH (a:L {id: id})-[r]-(b)` looks each `a` up through the index on `:L(id)` and expands from it, as it does with `a` in a `MATCH` of its own. It used to scan every `:L` node and join the result, about a second on a label of a few million nodes however few the ids.
+
+---
+
 ## 0.9.1 - 2026-11-06
 
 ### Query engine
