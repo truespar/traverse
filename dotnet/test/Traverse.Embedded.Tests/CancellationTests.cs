@@ -12,7 +12,7 @@ namespace Traverse.Tests;
 public sealed class CancellationTests
 {
     // a three-way cross product over 2,000 nodes: minutes of work unless stopped
-    private const string Long = "MATCH (a:Big), (b:Big), (c:Big) RETURN count(*)";
+    private const string Long = "MATCH (a:Big), (b:Big), (c:Big) WHERE a.i + b.i + c.i > 0 RETURN count(*)";
 
     private static void Seed(Database db)
     {

@@ -2419,7 +2419,7 @@ where
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn dropping_the_response_stream_stops_the_statement() {
     let (url, _shutdown, mut observer) = grpc_server_with_big_graph().await;
-    let query = "MATCH (a:Big), (b:Big), (c:Big) RETURN count(*) AS dropped";
+    let query = "MATCH (a:Big), (b:Big), (c:Big) WHERE a.i + b.i + c.i > 0 RETURN count(*) AS dropped";
     let mut client = TraverseServiceClient::connect(url).await.unwrap();
     let stream = client
         .execute_query(proto::ExecuteQueryRequest {
@@ -2455,7 +2455,7 @@ async fn a_request_timeout_stops_the_statement() {
     let started = std::time::Instant::now();
     let mut stream = client
         .execute_query(proto::ExecuteQueryRequest {
-            query: "MATCH (a:Big), (b:Big), (c:Big) RETURN count(*) AS timed".into(),
+            query: "MATCH (a:Big), (b:Big), (c:Big) WHERE a.i + b.i + c.i > 0 RETURN count(*) AS timed".into(),
             timeout_ms: 300,
             ..Default::default()
         })

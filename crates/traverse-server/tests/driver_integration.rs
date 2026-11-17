@@ -3047,7 +3047,7 @@ async fn open_transaction_blocks_no_writer_and_keeps_its_snapshot() {
 /// in parallel against one process-wide transaction registry, so each names its own column and
 /// finds its own statement by text.
 fn long_query(tag: &str) -> String {
-    format!("MATCH (a:Big), (b:Big), (c:Big) RETURN count(*) AS {tag}")
+    format!("MATCH (a:Big), (b:Big), (c:Big) WHERE a.i + b.i + c.i > 0 RETURN count(*) AS {tag}")
 }
 
 /// A server with 2,000 `:Big` nodes and a client connected to it.

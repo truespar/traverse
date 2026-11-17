@@ -87,7 +87,7 @@ public sealed class AutoCommitTests
         {
             var watch = Stopwatch.StartNew();
             Assert.ThrowsAny<OperationCanceledException>(
-                () => tdb.Db.Query("MATCH (a:Big), (b:Big), (c:Big) RETURN count(*)", cts.Token));
+                () => tdb.Db.Query("MATCH (a:Big), (b:Big), (c:Big) WHERE a.i + b.i + c.i > 0 RETURN count(*)", cts.Token));
             Assert.True(watch.Elapsed < TimeSpan.FromSeconds(20), $"took {watch.Elapsed}");
         }
         tdb.Db.BusyTimeout = Timeout.InfiniteTimeSpan;

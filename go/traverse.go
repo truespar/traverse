@@ -153,6 +153,10 @@ func cStringPinned(s string) (uintptr, []byte) {
 	return uintptr(unsafe.Pointer(&b[0])), b
 }
 
+// cbool reads a C bool return: only the low byte of the register is the value, the rest is
+// whatever the library left there.
+func cbool(r uintptr) bool { return byte(r) != 0 }
+
 func goString(ptr uintptr) string {
 	if ptr == 0 {
 		return ""
@@ -628,14 +632,14 @@ func readResult(resultPtr uintptr) (*QueryResult, error) {
 
 	for {
 		r := procResultNext.Call(resultPtr)
-		if r == 0 {
+		if !cbool(r) {
 			break
 		}
 		row := make(map[string]interface{}, colCount)
 		for i := 0; i < colCount; i++ {
 			col := uintptr(i)
 			r := procResultIsNull.Call(resultPtr, col)
-			if r != 0 {
+			if cbool(r) {
 				row[columns[i]] = nil
 				continue
 			}
@@ -660,7 +664,7 @@ func readResult(resultPtr uintptr) (*QueryResult, error) {
 				}
 			case "BOOLEAN":
 				r = procResultGetBool.Call(resultPtr, col)
-				row[columns[i]] = r != 0
+				row[columns[i]] = cbool(r)
 			case "STRING":
 				r = procResultGetString.Call(resultPtr, col)
 				if r != 0 {

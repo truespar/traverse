@@ -1139,7 +1139,7 @@ func TestBulkLoadInvisibleUntilCommit(t *testing.T) {
 // --- Stopping statements ----------------------------------------------------
 
 // a three-way cross product over 2,000 nodes: minutes of work unless stopped
-const longQuery = "MATCH (a:Big), (b:Big), (c:Big) RETURN count(*)"
+const longQuery = "MATCH (a:Big), (b:Big), (c:Big) WHERE a.i + b.i + c.i > 0 RETURN count(*)"
 
 func seedBig(t *testing.T, db *Database) {
 	t.Helper()

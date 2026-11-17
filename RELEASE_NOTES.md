@@ -4,11 +4,19 @@ All notable changes to Traverse are documented in this file.
 
 ---
 
-## Unreleased
+## 0.9.2 - 2026-11-17
 
 ### Query engine
 
 - **Index lookups from a pattern.** `UNWIND $ids AS id MATCH (a:L {id: id})-[r]-(b)` looks each `a` up through the index on `:L(id)` and expands from it, as it does with `a` in a `MATCH` of its own. It used to scan every `:L` node and join the result, about a second on a label of a few million nodes however few the ids.
+
+### Platforms
+
+- **macOS on Apple silicon.** The server, CLI and admin tools ship as `traverse-<version>-aarch64-macos.tar.gz`, the C library as `traverse-ffi-<version>-aarch64-macos.tar.gz` for Go and C, and the `Traverse.Embedded` NuGet package and the Java jar carry the library under `runtimes/osx-arm64` and `natives/macos-aarch64`, so .NET and Java need neither `TRAVERSE_FFI_LIB` nor `TRAVERSE_JAVA_LIB` on a Mac. Every binary is Developer ID-signed and notarized. Node.js and Python packages stay Windows and Linux x64 in this release.
+
+### Embedded bindings
+
+- **Go.** Values are read correctly from the release build of the native library; with 0.9.1 on Windows every column could come back as `nil`.
 
 ---
 

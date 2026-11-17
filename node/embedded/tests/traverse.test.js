@@ -1160,7 +1160,7 @@ test('transaction outlives its database object', () => {
 section('Stopping statements');
 
 // a three-way cross product over 2,000 nodes: minutes of work unless stopped
-const LONG = 'MATCH (a:Big), (b:Big), (c:Big) RETURN count(*)';
+const LONG = 'MATCH (a:Big), (b:Big), (c:Big) WHERE a.i + b.i + c.i > 0 RETURN count(*)';
 
 function seedBig(db) {
     const tx = db.begin();

@@ -1398,7 +1398,7 @@ class TraverseTest {
     @Nested
     class TestCancellation {
         // a three-way cross product over 2,000 nodes: minutes of work unless stopped
-        private static final String LONG = "MATCH (a:Big), (b:Big), (c:Big) RETURN count(*)";
+        private static final String LONG = "MATCH (a:Big), (b:Big), (c:Big) WHERE a.i + b.i + c.i > 0 RETURN count(*)";
 
         private void seed(Database db) {
             try (Transaction tx = db.begin()) {
@@ -1564,7 +1564,7 @@ class TraverseTest {
                 db.execute("UNWIND range(1, 2000) AS i CREATE (:Big {i: i})");
                 db.setStatementTimeout(Duration.ofMillis(200));
                 assertThrows(QueryInterruptedException.class,
-                    () -> db.execute("MATCH (a:Big), (b:Big), (c:Big) RETURN count(*)"));
+                    () -> db.execute("MATCH (a:Big), (b:Big), (c:Big) WHERE a.i + b.i + c.i > 0 RETURN count(*)"));
             }
         }
     }
